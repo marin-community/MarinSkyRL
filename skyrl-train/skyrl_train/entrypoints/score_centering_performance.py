@@ -679,6 +679,33 @@ class PerformanceTrainer(RayPPOTrainer):
             await self.context.close()
             self.save_probe()
 
+    async def native_periodic_comparison(self):
+        """Retain six normal-reward updates before the asynchronous arms."""
+        spec = self.cfg.trainer.score_centering_performance
+        await self.context.close()
+        await self.settings(0, False)
+        self.cfg.trainer.algorithm.score_centering_probe.interval = 2
+        self.context = TrainingContext.from_config(self.cfg, self.train_dataset, self.trajectory_runner)
+        self.context.start()
+        self._performance_fixed_advantages = False
+        self._performance_record_evidence = True
+        observed = 0
+        self.probe["native_periodic_windows"] = []
+        for index in range(6):
+            await self.settings(0, False)
+            async with asyncio.timeout(int(spec.window_timeout_seconds)):
+                result = await self.native_window(f"native/{index}")
+            observed += int(result["metrics"].get("score_centering_probe/sampled_tokens", 0) > 0)
+            self.probe["native_periodic_windows"].append(result)
+            self.save_probe()
+        assert observed >= 3
+        self.probe["qualification"]["repeated_periodic_observations"] = observed
+
+    def finish_performance_report(self):
+        self.probe["complete"] = True
+        self.probe["applied_updates"] = self._performance_applied_updates
+        self.save_probe()
+
     def convert_to_training_input(self, *args, **kwargs):
         if not self._performance_driver_profile:
             return super().convert_to_training_input(*args, **kwargs)
@@ -698,6 +725,7 @@ class PerformanceTrainer(RayPPOTrainer):
     async def _train_loop(self):
         configure_coreweave_s3()
         spec = self.cfg.trainer.score_centering_performance
+        assert spec.scope in ("full", "controls", "async")
         short = spec.workload == "qwen"
         # Both integration arms start from the previously qualified product,
         # including periodic probes and flat raw-generation support.
@@ -712,6 +740,7 @@ class PerformanceTrainer(RayPPOTrainer):
             "schema": 2,
             "workload": spec.workload,
             "variant": spec.variant,
+            "scope": spec.scope,
             "candidate": spec.candidate,
             "windows": [],
             "qualification": {},
@@ -925,6 +954,12 @@ class PerformanceTrainer(RayPPOTrainer):
         self.probe["qualification"]["native_initial_sync_seconds"] = time.perf_counter() - native_sync_started
         self.save_probe()
 
+        if spec.scope == "async":
+            await self.native_periodic_comparison()
+            await self.asynchronous_comparison()
+            self.finish_performance_report()
+            return
+
         # Use the actual rollout coordinator, task workers, object store, old
         # scoring and optimizer path. Only response lengths, signed advantages
         # and masks are controlled for the serialized cost comparison.
@@ -999,26 +1034,7 @@ class PerformanceTrainer(RayPPOTrainer):
                 self.probe["windows"].append(result)
                 self.save_probe()
 
-        if candidate:
-            await self.context.close()
-            await self.settings(0, False)
-            self.cfg.trainer.algorithm.score_centering_probe.interval = 2
-            self.context = TrainingContext.from_config(self.cfg, self.train_dataset, self.trajectory_runner)
-            self.context.start()
-            self._performance_fixed_advantages = False
-            self._performance_record_evidence = True
-            observed = 0
-            self.probe["native_periodic_windows"] = []
-            for index in range(6):
-                await self.settings(0, False)
-                async with asyncio.timeout(int(spec.window_timeout_seconds)):
-                    result = await self.native_window(f"native/{index}")
-                observed += int(result["metrics"].get("score_centering_probe/sampled_tokens", 0) > 0)
-                self.probe["native_periodic_windows"].append(result)
-                self.save_probe()
-            assert observed >= 3
-            self.probe["qualification"]["repeated_periodic_observations"] = observed
-        await self.asynchronous_comparison()
-        self.probe["complete"] = True
-        self.probe["applied_updates"] = self._performance_applied_updates
-        self.save_probe()
+        if spec.scope != "controls":
+            await self.native_periodic_comparison()
+            await self.asynchronous_comparison()
+        self.finish_performance_report()
