@@ -1705,6 +1705,9 @@ class RayPPOTrainer:
                 verification = statuses[0].metadata["verification"]
                 logger.info("thundersync_probe_exactness {}", json.dumps(verification))
             status = statuses[0].metadata["train_status"]
+            status["probe/peak_allocated_bytes"] = max(
+                result.metadata["train_status"]["probe/peak_allocated_bytes"] for result in statuses
+            )
             self.all_metrics.update({f"policy/{key}": value for key, value in status.items()})
             self._policy_version_step = self.global_step
         else:
@@ -3302,6 +3305,10 @@ class RayPPOTrainer:
             empty_cache_refs += self.critic_model.async_run_ray_method("pass_through", "empty_cache")
 
         policy_status = policy_statuses[0].metadata["train_status"]
+        if "probe/peak_allocated_bytes" in policy_status:
+            policy_status["probe/peak_allocated_bytes"] = max(
+                result.metadata["train_status"]["probe/peak_allocated_bytes"] for result in policy_statuses
+            )
         for k, v in policy_status.items():
             self.all_metrics.update({f"policy/{k}": v})
         empty_cache_refs += self.policy_model.async_run_ray_method("pass_through", "empty_cache")

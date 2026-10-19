@@ -383,7 +383,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._consecutive_nonfinite_steps = 0
 
     def forward(self, data, *, probe_micro_batch_size: int | None = None):
-        with self._memory.span("forward", step=data.metadata.get("global_step")):
+        step = data.metadata.get("global_step")
+        if step is not None and step != self._probe_memory_step:
+            torch.cuda.reset_peak_memory_stats()
+            self._probe_memory_step = step
+        with self._memory.span("forward", step=step):
             return super().forward(data, probe_micro_batch_size=probe_micro_batch_size)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
@@ -501,6 +505,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self._normalize_mini_batch_size()
         self._probe_open = False
+        self._probe_memory_step = None
 
         # create scheduler
         self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -567,6 +572,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         for module in self.actor_module:
             module.zero_grad_buffer()
         torch.cuda.reset_peak_memory_stats()
+        self._probe_memory_step = step
 
     def _probe_micro_batches(self, data):
         micros = []
@@ -774,7 +780,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
-        torch.cuda.reset_peak_memory_stats()
         self._drain_r3_decentral_stagger(train_data)
         if self.model.router_replay is not None and train_data.routed_experts is None:
             raise ValueError("moe_router_replay is on but the batch carries no rollout_routed_experts")
