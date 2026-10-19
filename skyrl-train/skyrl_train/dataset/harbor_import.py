@@ -37,6 +37,8 @@ from taskcompendium.models import (
 )
 from taskcompendium.runtime.resources import inline_resource, resource_bytes
 
+HARBOR_IMPORTER_REVISION = "skyrl-harbor-v1"
+
 
 class TaskOS(StrEnum):
     LINUX = "linux"

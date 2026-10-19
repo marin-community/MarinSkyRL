@@ -21,10 +21,12 @@ from shellbox.image import DockerfileSource, RegistryImage, image_source_key
 from taskcompendium.models import ScriptGrader, Source, VerifyitGrader
 
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
+from cloud.iris.iris_backend import DAYTONA_RL_SECRET_NAME
 from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.packed_tasks import PackedTaskMaterializer, select_task_references
 from marinskyrl.task_sources import DirectoryDataSource, data_source
 from skyrl_train.dataset.harbor_import import (
+    HARBOR_IMPORTER_REVISION,
     HARBOR_TRIAL_SESSION,
     TaskConfig,
     harbor_task,
@@ -75,7 +77,7 @@ def _lowered_tasks(config: DictConfig, field: str, root: Path) -> Iterator[Lower
                     dataset=source.identity,
                     revision=source.identity,
                     row=directory.name,
-                    importer_revision="skyrl-harbor-v1",
+                    importer_revision=HARBOR_IMPORTER_REVISION,
                 ),
             )
             return lower_harbor_task(directory, task, session=limits)
@@ -244,7 +246,7 @@ async def prepare_daytona_snapshots(config: DictConfig) -> None:
         for key, requirement in unique.items():
             async with AsyncDaytona(DaytonaConfig(api_key=os.environ[requirement.api_key_env])) as client:
                 # The eval org is exempt from the RL snapshot purge policy.
-                if requirement.api_key_env == "DAYTONA_RL_API_KEY" and requirement.api_key_env not in cleaned:
+                if requirement.api_key_env == DAYTONA_RL_SECRET_NAME and requirement.api_key_env not in cleaned:
                     await purge_stale_snapshots(client)
                     cleaned.add(requirement.api_key_env)
                 logger.info(

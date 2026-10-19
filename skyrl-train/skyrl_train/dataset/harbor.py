@@ -18,6 +18,7 @@ from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference,
 from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TaskDataset, cache_tasks
 from skyrl_train.dataset.harbor_import import (
+    HARBOR_IMPORTER_REVISION,
     HARBOR_TRIAL_SESSION,
     harbor_task,
     harbor_trial_task,
@@ -160,7 +161,7 @@ def materialize_harbor_tasks(
                             dataset=data_source,
                             revision="unhashed",
                             row=uid,
-                            importer_revision="skyrl-harbor-v1",
+                            importer_revision=HARBOR_IMPORTER_REVISION,
                         ),
                     )
                     if grader_override is not None:
