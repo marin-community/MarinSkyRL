@@ -27,6 +27,55 @@ from rolloutengine.contracts import RolloutContractError, SessionStart, Transiti
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
+from tests.cpu.task_specs import SHELL_ENVIRONMENT
+from shellbox.backends.shellsim.machine import ShellSimMachineFactory
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_turns,task_turns,score", [(2, 1, 1.0), (1, 2, 0.0)])
+async def test_run_session_overrides_allow_tool_result_then_answer(task_inputs, run_turns, task_turns, score):
+    config, request = task_inputs
+    config.max_turns = run_turns
+    original = request.rows[0].lowered
+    task = original.task.model_copy(update={"environment_requirements": SHELL_ENVIRONMENT})
+    lowered = lowered_task(task, backend="shellsim", max_turns=task_turns)
+    request = replace(request, rows=(task_input(lowered),))
+    model = ConversationClient(
+        ["", "12"],
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "read",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": '{"command":"echo 12"}'},
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "12"},
+        ],
+    )
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(config, Tokenizer()),
+        model,
+        {"shellsim": ShellSimMachineFactory()},
+        shutdown_timeout=30,
+        session_overrides={"max_turns": run_turns, "shell_tool": {"name": "run", "command_parameter": "command"}},
+    )
+    try:
+        (result,) = await worker.generate(request)
+    finally:
+        await worker.shutdown()
+    assert result.grade.reward == score
+    assert len(model.requests) == run_turns
+    if run_turns == 2:
+        observation = model.requests[1]["prompts"][0][-1]
+        assert observation["role"] == "tool"
+        assert "12" in observation["content"]
+    assert lowered.session.max_turns == task_turns
+    assert lowered.session.shell_tool.name == "shell"
 
 
 @pytest.mark.asyncio

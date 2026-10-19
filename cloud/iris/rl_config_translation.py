@@ -221,6 +221,8 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
     client input limit therefore reserves the complete per-turn output allowance.
     """
     _validate_no_derived_context_fields(raw, config_path)
+    if "max_turns" in raw.get("environment", {}).get("task_sessions", {}).get("overrides", {}):
+        raise ValueError(f"{config_path}: set max_turns only in context_budget, not task session overrides")
     config = raw.get("context_budget")
     if not isinstance(config, dict):
         raise ValueError(f"{config_path}: context_budget must be a mapping")
@@ -596,7 +598,16 @@ def parse_rl_config(
         trainer=trainer,
         generator=generator,
         data=data,
-        environment=environment,
+        environment={
+            **environment,
+            "task_sessions": {
+                **environment.get("task_sessions", {}),
+                "overrides": {
+                    **environment.get("task_sessions", {}).get("overrides", {}),
+                    "max_turns": context_budget.max_turns,
+                },
+            },
+        },
         trajectory_runner=trajectory_runner,
         terminal_bench=terminal_bench,
         tensor_parallel_size=tensor_parallel_size,

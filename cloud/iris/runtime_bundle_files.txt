@@ -1,6 +1,7 @@
 # Paths are relative to the MarinSkyRL checkout and are copied into each Iris task workspace.
 cloud/iris/__init__.py
 cloud/iris/artifacts.py
+cloud/iris/daytona_preflight.py
 cloud/iris/export_hf_checkpoint.py
 cloud/iris/extract_tasks_from_parquet.py
 cloud/iris/hf_datasets.py

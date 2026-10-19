@@ -357,10 +357,12 @@ class TaskRolloutWorker:
         shutdown_timeout: float,
         installed_agents: InstalledAgentWorker | None = None,
         judge_connection: JudgeConnection | None = None,
+        session_overrides: Mapping[str, Any] | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
         self.judge_connection = judge_connection
+        self.session_overrides = dict(session_overrides or {})
         self.factories = {name: OwnedMachineFactory(factory, name) for name, factory in factories.items()}
         self.active_requests: set[asyncio.Task] = set()
         self.cancelled_rollouts: set[asyncio.Task] = set()
@@ -414,6 +416,9 @@ class TaskRolloutWorker:
     def _configured_task_and_sessions(
         self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str, phase: str
     ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
+        if self.session_overrides:
+            session = type(lowered.session).model_validate({**lowered.session.model_dump(), **self.session_overrides})
+            lowered = lowered.model_copy(update={"session": session})
         sessions = self.sessions
         if lowered.session.task_session == HARBOR_TRIAL_SESSION:
             if harbor is None or self.installed_agents is None:
@@ -736,4 +741,7 @@ class TaskRolloutWorkerSpec:
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
             installed_agents=installed_agents,
             judge_connection=judge,
+            session_overrides=OmegaConf.to_container(
+                self.config.environment.task_sessions.get("overrides", {}), resolve=True
+            ),
         )

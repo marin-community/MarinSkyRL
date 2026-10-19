@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
+from rolloutengine.lowering import SHELLBOX_SESSION
+from shellbox.machine import Backend, NetworkPolicy
 
 from taskcompendium.models import (
     AnswerType,
@@ -30,6 +33,7 @@ from taskcompendium.models import (
     TaskSpec,
     TextMessage,
     VerifierArtifact,
+    VerifyitGrader,
 )
 from taskcompendium.runtime.resources import inline_resource, resource_bytes
 
@@ -105,6 +109,48 @@ AGENT_LOG_PATH = "/logs/agent"
 GRADER_DIRECTORY = "/tests"
 GRADER_PATH = f"{GRADER_DIRECTORY}/test.sh"
 HARBOR_TRIAL_SESSION = "harbor_trial"
+
+
+def harbor_machine(environment: EnvironmentConfig, user: str | int | None) -> MachineRuntimeSpec:
+    return MachineRuntimeSpec(
+        backend=Backend.DOCKER,
+        network=NetworkPolicy.ALLOW if environment.allow_internet else NetworkPolicy.DENY,
+        cpus=environment.cpus,
+        memory_mb=environment.memory_mb,
+        storage_mb=environment.storage_mb,
+        gpus=0 if environment.gpus is None else environment.gpus,
+        user=None if user is None else str(user),
+        startup_timeout=environment.build_timeout_sec,
+        cleanup_timeout=None,
+    )
+
+
+def lower_harbor_task(directory: Path, task: TaskSpec, *, session: TaskSessionSpec) -> LoweredTaskSpec:
+    """Use package machine settings and phase deadlines, with other limits from the caller."""
+    config = TaskConfig.model_validate_toml((directory / "task.toml").read_text())
+    if session.task_session == HARBOR_TRIAL_SESSION:
+        return LoweredTaskSpec(
+            task=task, runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None), session=session
+        )
+    task_machine = harbor_machine(config.environment, config.agent.user)
+    verifier_machine = (
+        harbor_machine(config.verifier.environment or config.environment, config.verifier.user)
+        if isinstance(task.grader, ScriptGrader)
+        or (isinstance(task.grader, VerifyitGrader) and task.grader.environment is not None)
+        else None
+    )
+    return LoweredTaskSpec(
+        task=task,
+        runtime=TaskRuntimeSpec(task_machine=task_machine, verifier_machine=verifier_machine),
+        session=TaskSessionSpec.model_validate(
+            {
+                **session.model_dump(),
+                "task_session": SHELLBOX_SESSION,
+                "total_turn_timeout": config.agent.timeout_sec,
+                "verifier_timeout": config.verifier.timeout_sec,
+            }
+        ),
+    )
 
 
 def _directory_resources(directory: Path, prefix: str = "") -> tuple[TaskResource, ...]:

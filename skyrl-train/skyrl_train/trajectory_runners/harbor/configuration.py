@@ -281,28 +281,7 @@ class HarborConfigBuilder:
 
     def environment_config(self) -> EnvironmentConfig:
         """Build EnvironmentConfig from config."""
-        env_fields = {}
-        env_kwargs = {}
-
-        for yaml_key, mapping in ENVIRONMENT_SCHEMA.fields.items():
-            value = self._get_field_value(yaml_key, mapping)
-            if value is not None:
-                if mapping.field_type == "kwargs":
-                    # Pass through to environment kwargs
-                    env_kwargs[mapping.harbor_field] = value
-                elif mapping.harbor_field == "type":
-                    # Special handling for environment type
-                    if isinstance(value, str):
-                        value = EnvironmentType(value)
-                    env_fields[mapping.harbor_field] = value
-                else:
-                    env_fields[mapping.harbor_field] = value
-
-        # Add kwargs if any were collected
-        if env_kwargs:
-            env_fields["kwargs"] = env_kwargs
-
-        return EnvironmentConfig(**env_fields)
+        return EnvironmentConfig.from_harbor_config(self._harbor_cfg)
 
     def verifier_config(self) -> VerifierConfig:
         """Build VerifierConfig from config."""

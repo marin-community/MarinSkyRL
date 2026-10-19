@@ -11,20 +11,17 @@ from typing import Any
 import pyarrow.parquet as pq
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
-from rolloutengine.lowering import SHELLBOX_SESSION
-from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
-from shellbox.machine import Backend, NetworkPolicy
-from taskcompendium.models import NoGrader, ScriptGrader, Source, TaskSpec, VerifyitGrader
+from rolloutengine.spec import LoweredTaskSpec, TaskSessionSpec
+from taskcompendium.models import NoGrader, Source
 
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference, select_task_references
 from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TaskDataset, cache_tasks
 from skyrl_train.dataset.harbor_import import (
     HARBOR_TRIAL_SESSION,
-    EnvironmentConfig,
-    TaskConfig,
     harbor_task,
     harbor_trial_task,
+    lower_harbor_task,
 )
 
 MATERIALIZATION_BATCH_SIZE = 64
@@ -127,52 +124,6 @@ def harbor_task_ids(task_path: Path) -> set[str]:
             task_ids.add(f"{github_repo.replace('/', '__')}-{base_commit}")
 
     return {task_id.casefold() for task_id in task_ids}
-
-
-def harbor_machine(environment: EnvironmentConfig, user: str | int | None) -> MachineRuntimeSpec:
-    return MachineRuntimeSpec(
-        backend=Backend.DOCKER,
-        network=NetworkPolicy.ALLOW if environment.allow_internet else NetworkPolicy.DENY,
-        cpus=environment.cpus,
-        memory_mb=environment.memory_mb,
-        storage_mb=environment.storage_mb,
-        gpus=0 if environment.gpus is None else environment.gpus,
-        user=None if user is None else str(user),
-        startup_timeout=environment.build_timeout_sec,
-        cleanup_timeout=None,
-    )
-
-
-def lower_harbor_task(directory: Path, task: TaskSpec, *, session: TaskSessionSpec) -> LoweredTaskSpec:
-    """Use package machine settings and phase deadlines, with other limits from the caller."""
-    config = TaskConfig.model_validate_toml((directory / "task.toml").read_text())
-
-    if session.task_session == HARBOR_TRIAL_SESSION:
-        return LoweredTaskSpec(
-            task=task,
-            runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-            session=session,
-        )
-
-    task_machine = harbor_machine(config.environment, config.agent.user)
-    verifier_machine = (
-        harbor_machine(config.verifier.environment or config.environment, config.verifier.user)
-        if isinstance(task.grader, ScriptGrader)
-        or (isinstance(task.grader, VerifyitGrader) and task.grader.environment is not None)
-        else None
-    )
-    return LoweredTaskSpec(
-        task=task,
-        runtime=TaskRuntimeSpec(task_machine=task_machine, verifier_machine=verifier_machine),
-        session=TaskSessionSpec.model_validate(
-            {
-                **session.model_dump(),
-                "task_session": SHELLBOX_SESSION,
-                "total_turn_timeout": config.agent.timeout_sec,
-                "verifier_timeout": config.verifier.timeout_sec,
-            }
-        ),
-    )
 
 
 def materialize_harbor_tasks(
