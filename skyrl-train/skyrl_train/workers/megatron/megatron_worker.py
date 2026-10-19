@@ -771,6 +771,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             verification["mutation"] or not self.cfg.trainer.gradient_streaming.allow_unresolved_exactness
         ):
             raise RuntimeError(f"THUNDERSYNC_EXACTNESS_FAIL {json.dumps(verification)}")
+        if passed and self.cfg.trainer.gradient_streaming.drop_one_group:
+            raise RuntimeError(f"THUNDERSYNC_CHECK_SENSITIVITY_FAIL {json.dumps(verification)}")
         with torch.no_grad():
             for param, grad in zip(self._probe_parameters, self._probe_batch, strict=True):
                 param.grad.copy_(grad.to(param.grad.device))
