@@ -1,11 +1,11 @@
 """
 Integration test for full trainer checkpointing functionality.
 
-This test validates that the RayPPOTrainer can save and restore ALL training state,
-ensuring that training can resume exactly where it left off.
+Exercise a policy update, full trainer save, restore into a fresh trainer and
+a second save with optimizer sharding metadata and the latest-step file.
 
-Run with:
-uv run --group dev --extra vllm --extra megatron pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py
+Run on Iris with an s3:// MARIN_TEMP_PREFIX or MARIN_PREFIX:
+uv run --group dev --extra vllm --extra megatron pytest skyrl-train/tests/gpu/gpu_ci/test_trainer_full_checkpointing.py
 """
 
 import asyncio
@@ -16,8 +16,8 @@ import pytest
 import hydra
 import torch
 import os
-import shutil
-import tempfile
+import posixpath
+from uuid import uuid4
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset
 from unittest.mock import AsyncMock, MagicMock
@@ -27,6 +27,8 @@ from skyrl_train.rollouts.context import TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer, build_models
+from skyrl_train.io import io
+from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
 from tests.gpu.utils import import_worker, ray_init_for_tests
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -87,8 +89,10 @@ def get_test_trainer_config(strategy: str, optimizer_checkpoint_sharding_type: s
         cfg.trainer.train_batch_size = 4
         cfg.trainer.policy_mini_batch_size = 4
 
-    # Use temporary directories
-    cfg.trainer.export_path = tempfile.mkdtemp(prefix="trainer_ckpt_test_")
+    checkpoint_prefix = os.environ.get("MARIN_TEMP_PREFIX", os.environ.get("MARIN_PREFIX", ""))
+    if not checkpoint_prefix.startswith("s3://"):
+        raise ValueError("Run the trainer checkpoint test on Iris with CoreWeave object storage configured")
+    cfg.trainer.export_path = posixpath.join(checkpoint_prefix, "tests", "trainer-checkpoint", uuid4().hex)
     cfg.trainer.ckpt_path = cfg.trainer.export_path
 
     # Enable checkpointing with correct config names
@@ -148,7 +152,8 @@ def saved_optimizer_format(checkpoint_dir: str) -> str:
     from megatron.core import dist_checkpointing
     from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
 
-    common_state = dist_checkpointing.load_common_state_dict(os.path.join(checkpoint_dir, "policy"))
+    with remote_checkpoint_metadata(posixpath.join(checkpoint_dir, "policy")) as metadata_dir:
+        common_state = dist_checkpointing.load_common_state_dict(metadata_dir)
     return _saved_optimizer_sharding_type(common_state)
 
 
@@ -160,21 +165,10 @@ def saved_optimizer_format(checkpoint_dir: str) -> str:
     ],
 )
 def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, resumed_sharding_type):
-    """
-    Test full trainer checkpointing by:
-    1. Creating trainer and setting it up
-    2. Saving checkpoint
-    3. Capturing training state
-    4. Destroying trainer
-    5. Creating new trainer with resume enabled
-    6. Loading checkpoint
-    7. Verifying all state matches
-    8. Continuing training to ensure it works
-    """
+    """Update, save, restore into a fresh trainer and save with the selected sharding format."""
     strategy = "megatron"
     cfg = get_test_trainer_config(strategy, initial_sharding_type)
 
-    checkpoint_dir = None
     try:
         # ============= PHASE 1: Initial Training and Save =============
         print("Phase 1: Initial training and checkpoint save")
@@ -187,6 +181,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
             from tests.gpu.test_megatron_worker import get_test_training_batch
 
             batch = get_test_training_batch(batch_size=4)
+            batch.metadata["global_step"] = 1
             ray.get(trainer1.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
 
         # Set initial global step as if 2 steps were completed
@@ -197,31 +192,30 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
 
         # Capture state before teardown
         saved_global_step = trainer1.global_step
-        checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer1.global_step}")
+        checkpoint_dir = posixpath.join(cfg.trainer.export_path, f"global_step_{trainer1.global_step}")
 
         # Verify checkpoint structure was created
         expected_files = [
-            os.path.join(checkpoint_dir, "policy"),
-            os.path.join(checkpoint_dir, "trainer_state.pt"),
-            os.path.join(checkpoint_dir, "data.pt"),
+            posixpath.join(checkpoint_dir, "policy"),
+            posixpath.join(checkpoint_dir, "trainer_state.pt"),
+            posixpath.join(checkpoint_dir, "data.pt"),
         ]
         for expected_file in expected_files:
-            assert os.path.exists(expected_file), f"Expected checkpoint file/dir not found: {expected_file}"
+            assert io.exists(expected_file), f"Expected checkpoint file/dir not found: {expected_file}"
         if strategy == "megatron":
             assert saved_optimizer_format(checkpoint_dir) == initial_sharding_type
 
         # Verify atomic tracking file
-        latest_ckpt_file = os.path.join(cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
-        assert os.path.exists(latest_ckpt_file)
-        with open(latest_ckpt_file, "r") as f:
+        latest_ckpt_file = posixpath.join(cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+        assert io.exists(latest_ckpt_file)
+        with io.open_file(latest_ckpt_file, "r") as f:
             latest_step = int(f.read())
         assert latest_step == trainer1.global_step, "Atomic tracking file has incorrect step after first save"
 
         # Verify trainer state content
         print("Verifying checkpoint content...")
-        loaded_trainer_state = torch.load(
-            os.path.join(checkpoint_dir, "trainer_state.pt"), map_location="cpu", weights_only=False
-        )
+        with io.open_file(posixpath.join(checkpoint_dir, "trainer_state.pt"), "rb") as file:
+            loaded_trainer_state = torch.load(file, map_location="cpu", weights_only=False)
 
         # Check key configuration values are preserved
         assert loaded_trainer_state["config"]["trainer"]["train_batch_size"] == cfg.trainer.train_batch_size, (
@@ -254,26 +248,24 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         assert loaded_checkpoint_dir == checkpoint_dir, "Checkpoint path mismatch"
         assert trainer2._restored_rollout_state == ROLLOUT_STATE
 
-        # ============= PHASE 3: Continue Training =============
+        # ============= PHASE 3: Second checkpoint save =============
         print("Phase 3: Second checkpoint save")
 
-        # Try to save another checkpoint to test cleanup logic
         trainer2.global_step = 3
         asyncio.run(trainer2.save_checkpoints())
 
-        next_checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer2.global_step}")
-        assert os.path.exists(next_checkpoint_dir), "Could not save checkpoint after resume"
+        next_checkpoint_dir = posixpath.join(cfg.trainer.export_path, f"global_step_{trainer2.global_step}")
+        assert io.exists(next_checkpoint_dir), "Could not save checkpoint after resume"
         if strategy == "megatron":
             assert saved_optimizer_format(next_checkpoint_dir) == resumed_sharding_type
 
         # Verify atomic tracking file is updated
-        latest_ckpt_file = os.path.join(cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
-        assert os.path.exists(latest_ckpt_file)
-        with open(latest_ckpt_file, "r") as f:
+        latest_ckpt_file = posixpath.join(cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+        assert io.exists(latest_ckpt_file)
+        with io.open_file(latest_ckpt_file, "r") as f:
             latest_step = int(f.read())
         assert latest_step == trainer2.global_step, "Atomic tracking file was not updated after second save"
 
     finally:
-        if checkpoint_dir and os.path.exists(os.path.dirname(checkpoint_dir)):
-            print(f"Cleaning up checkpoint directory: {os.path.dirname(checkpoint_dir)}")
-            shutil.rmtree(os.path.dirname(checkpoint_dir))
+        if io.exists(cfg.trainer.ckpt_path):
+            io.remove(cfg.trainer.ckpt_path)

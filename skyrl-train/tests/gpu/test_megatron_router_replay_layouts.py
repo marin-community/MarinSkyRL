@@ -45,10 +45,8 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.router_replay_fixtures import random_unique_routes
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
-    NUM_EXPERTS,
-    NUM_LAYERS,
-    _write_tiny_checkpoint,
     RESPONSE_LENGTH,
     _config,
     _padded_batch,
@@ -75,7 +73,7 @@ def _layout_config(tmp_path, layout) -> tuple:
     _, world_size, tp, pp, ep, cp, packing = layout
     model_path = tmp_path / "model"
     model_path.mkdir(parents=True)
-    _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK, vocab_size_multiple=2)
+    write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK, vocab_size_multiple=2)
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
@@ -91,11 +89,11 @@ def _routed_batch(pad_token_id: int, *, captured: bool, variable_lengths: bool =
         variable_lengths=variable_lengths,
     )
     generator = torch.Generator().manual_seed(31)
-    shape = (batch["sequences"].shape[0], batch.metadata["response_length"], NUM_LAYERS, TOPK)
+    shape = (batch["sequences"].shape[0], batch.metadata["response_length"], TOY_SHAPE["num_hidden_layers"], TOPK)
     if not captured:
         routes = torch.zeros(shape, dtype=torch.long)  # empty capture: everything routes natively
     else:
-        routes = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
+        routes = random_unique_routes(shape, TOY_SHAPE["num_local_experts"], generator=generator)
         routes[1] = 0  # one sample with fully-lost capture routes natively
     batch["rollout_routed_experts"] = routes.to(torch.int32)
     return batch
@@ -119,7 +117,6 @@ def test_all_placeholder_replay_matches_flag_off_at_same_weights(tmp_path, packi
     empty.routed_expert_rows = RoutedExpertRows(
         tuple(row[: int(mask.sum())].numpy() for row, mask in zip(dense_routes, empty["response_mask"], strict=True)),
         empty.metadata["response_length"],
-        NUM_EXPERTS,
     )
     without_routes = empty.select(["sequences", "attention_mask"], ["response_length"])
     scores = []
@@ -198,7 +195,6 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
     batch.routed_expert_rows = RoutedExpertRows(
         tuple(row[: int(mask.sum())].numpy() for row, mask in zip(dense_routes, batch["response_mask"], strict=True)),
         width,
-        NUM_EXPERTS,
     )
     batch.metadata["uids"] = [row.prompt_id for row in probes]
     initialize_ray(cfg)
