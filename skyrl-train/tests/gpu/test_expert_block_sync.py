@@ -239,7 +239,9 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
                 timings["free_bytes_after_prepare"] = [
                     torch.cuda.mem_get_info(index)[0] for index in range(torch.cuda.device_count())
                 ]
-            if not client.generation_paused_event.is_set():
+            if version == 1 and load_format == "dummy":
+                assert client.generation_paused_event.is_set(), "Dummy engines must pause before serving"
+            elif not client.generation_paused_event.is_set():
                 await client.pause_generation()
             early = None
             if version == 1 and load_format == "dummy":

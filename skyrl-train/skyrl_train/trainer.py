@@ -1470,6 +1470,7 @@ class RayPPOTrainer:
         Colocated engines sleep while the policy trains; they wake for the weights and then take the GPU
         memory the policy model releases. Separate engines keep serving rollouts, so they pause for the sync
         and their requests in flight resume on the new weights.
+        Engines that start with dummy weights are already paused at the initial sync.
         """
         if not self._inference_engines_configured():
             return

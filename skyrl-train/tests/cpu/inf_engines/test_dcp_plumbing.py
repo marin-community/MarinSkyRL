@@ -26,7 +26,7 @@ from ray.exceptions import ActorDiedError
 
 import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
 import skyrl_train.tokenizer as tokenizer_module
-from skyrl_train.config.dummy_engine_weights import validate_dummy_engine_weights
+from skyrl_train.utils import validate_generator_cfg
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints import main_base
 
@@ -159,6 +159,7 @@ def test_from_config_selects_weight_load_mode_for_object_store_policy(monkeypatc
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
+    cfg.trainer.logger = ["console"]
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.policy.model.path = "/tmp/model-metadata"
     cfg.trainer.policy.model.source_uri = "s3://models/policy"
@@ -172,9 +173,9 @@ def test_from_config_selects_weight_load_mode_for_object_store_policy(monkeypatc
 
     if load_format is not None and transport == "broadcast":
         with pytest.raises(ValueError, match="weight_sync_transport=expert_block"):
-            validate_dummy_engine_weights(cfg)
+            validate_generator_cfg(cfg)
         return
-    validate_dummy_engine_weights(cfg)
+    validate_generator_cfg(cfg)
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
     if load_format is not None:
