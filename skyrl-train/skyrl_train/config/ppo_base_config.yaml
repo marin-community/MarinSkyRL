@@ -54,6 +54,7 @@ trainer:
     source_data_sha256: null
     window_timeout_seconds: 600
     async_steps: 12
+    async_probe_steps: 12
     async_warmup_steps: 2
     async_phase_timeout_seconds: 2400
   evaluation_runner: training # task or harbor selects generated validation for offline preference training
