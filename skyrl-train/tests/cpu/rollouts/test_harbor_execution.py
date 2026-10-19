@@ -21,6 +21,7 @@ from taskcompendium.models import (
     EnvironmentRequirements,
     FileReward,
     MissingArtifactPolicy,
+    NoGrader,
     RewardFile,
     RewardFileFormat,
     ScriptGrader,
@@ -192,8 +193,14 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     native = HarborTaskDataset(
         [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "native", num_workers=1
     )
-    assert LoweredTaskSpec.model_validate_json(native[0][2]["lowered_task_spec"]).task.resources.verifier
+    prelowered = LoweredTaskSpec.model_validate_json(native[0][2]["lowered_task_spec"])
+    assert prelowered.task.resources.verifier
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"verifier_disable": True}}))
+    disabled_prelowered = settings.lowered(prelowered, phase=phase)
+    assert isinstance(disabled_prelowered.task.grader, NoGrader)
+    assert disabled_prelowered.task.resources.verifier == ()
+    assert disabled_prelowered.runtime.verifier_machine is None
+    assert prelowered.runtime.verifier_machine is not None
     prepared = HarborTaskDataset(
         [str(source)],
         Tokenizer(),

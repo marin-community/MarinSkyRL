@@ -98,6 +98,51 @@ class DummyRunner(FixtureRunner):
         return {**self.outputs[input_batch.metadata[0].uid], "trajectory_ids": list(input_batch.trajectory_ids)}
 
 
+@pytest.mark.asyncio
+async def test_eval_only_leases_policy_step_zero_for_installed_trials(dummy_config, tmp_path):
+    cfg = configure_eval(dummy_config, tmp_path)
+    row = {
+        "input": task_input(lowered_task(text_task("eval-only", prompt="question", source="dataset/eval"))),
+        "uid": "eval-only",
+    }
+    runner = DummyRunner(
+        {
+            "eval-only": {
+                "prompt_token_ids": [[101]],
+                "response_ids": [[201]],
+                "rewards": [1.0],
+                "loss_masks": [[1]],
+                "stop_reasons": ["stop"],
+                "rollout_logprobs": None,
+                "env_classes": ["fixture"],
+                "env_metrics": [{}],
+                "verification_results": [VerificationResult.verified(1.0, passed=True)],
+                "is_last_step": [True],
+            }
+        }
+    )
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "decoded"
+    sink = TrajectorySink(
+        parse_trajectory_retention_config(cfg.generator.trajectory_retention),
+        tokenizer,
+        publisher=InlineTrajectoryPublisher(execute_publication),
+    )
+
+    await evaluate(
+        eval_dataloader=DummyStatefulDataLoader([[row]]),
+        trajectory_runner=runner,
+        cfg=cfg,
+        global_step=None,
+        tokenizer=tokenizer,
+        trajectory_sink=sink,
+    )
+
+    assert len(runner.seen_inputs) == 1
+    assert runner.seen_inputs[0].batch_metadata.global_step == 0
+    assert runner.seen_inputs[0].batch_metadata.training_phase == "eval"
+
+
 def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
     batch: TrajectoryBatch = {
         "response_ids": [[1], [2]],
