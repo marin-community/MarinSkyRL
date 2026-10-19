@@ -56,6 +56,35 @@ the gradient. Outside the captured head, old and behavior probabilities are mode
 current policy, preserving each distribution's measured omitted mass. Small omitted mass alone does not
 bound parameter-gradient error or establish a learning benefit.
 
+## Native head transport
+
+Native positive-head requests collect numeric evidence through the pinned vLLM engine's public `generate`
+interface with `flat_logprobs`. The existing chat service still renders prompts, detokenizes responses and
+parses messages and tools. A request-scoped adapter packs owned NumPy arrays before the response crosses
+Ray to the task worker. The internal metadata stays outside the HTTP JSON body. Public chat responses retain
+their existing schema; ordinary chosen-token-only TIS keeps its existing path.
+
+For K128, collection retains the old 129-candidate request and reproduces the old chat display limit before
+selecting the head. This preserves token identity at tied probability boundaries, including when the sampled
+token is inside or outside the natural head. Scores remain normalized over the full vocabulary. The adapter
+clones sampling parameters, isolates concurrent captures and closes the public generator on cancellation.
+Empty aborts have zero-row arrays; resumed chunks retain their token alignment, heads and source versions.
+
+The numeric evidence follows this path:
+
+```mermaid
+flowchart LR
+    A[Public vLLM flat logprobs] --> B[Owned numeric arrays]
+    B --> C[Native Ray task]
+    C --> D[Existing rollout storage]
+    D --> E[CPU collation]
+    E --> F[Learner causal scoring and PPO/TIS/SC]
+```
+
+The pinned engine still returns CPU primitive lists. Ray transport, the existing S3 group store, padded learner
+tensors and transfer to learner GPUs remain in complete native cycles. The existing decoding and source-version
+hooks are unchanged. This integration adds no vLLM fork patch, internal override or dependency upgrade.
+
 ## Diagnostics
 
 ### Periodic probes with SC off
@@ -121,7 +150,7 @@ The sample takes the first valid tokens and does not estimate the response tail.
 values measure a loss term, not parameter-gradient change. They require no additional model forward.
 Leaving this count zero avoids the new diagnostics. Ordinary telemetry does not enable head capture.
 
-## Snowball qualification and cost
+## Prior Snowball qualification and cost
 
 The [qualification record](https://github.com/yonromai/marin/tree/af470a613fb0cc057c748d25ec681dd654821edb/experiments/post_training/score_centering_performance)
 contains submitted configurations, complete reports, profiling, independent replays and allocation accounting.
@@ -155,8 +184,8 @@ The implementation skips head-text decoding and unused display bytes for private
 preserves raw numeric arrays and safe int32 IDs, and reduces parsing/collation work. Response detokenization,
 public responses, probabilities, source stamps and the full-vocabulary normalizer are preserved. Native
 profiles confirm head-token decoding is removed; alternative object constructors showed no useful benefit.
-A compact native transport would require a larger design and further qualification. K32 remains an optional
-approximation without a Snowball learning or parameter-gradient justification here.
+The native array transport above is a follow-up to this qualification and has its own source pins and evidence.
+K32 remains an optional approximation without a Snowball learning or parameter-gradient justification here.
 
 A complete long-response probe adds 5.612 s over the armed path (95% mean interval 4.493–6.732 s), including
 all four 4096-token response heads and 96 valid sampled positions after masking. The default interval of ten
