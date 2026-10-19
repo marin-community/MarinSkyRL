@@ -30,6 +30,9 @@ from skyrl_train.trainer import RayPPOTrainer, convert_prompts_responses_to_batc
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.timing_observability import StepWallTime
 from skyrl_train.rollouts.context import TrainingContext, RolloutRequestSpec
+from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
+from skyrl_train.inference_engines.base import CHOICE_POLICY_STEPS_KEY
+from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 
 
 _device_memory_peak = 0
@@ -248,6 +251,12 @@ class PerformanceTrainer(RayPPOTrainer):
         self.cfg.generator.sampling_params.logprobs = width
         self.cfg.generator.sampling_params.temperature = temperature
         self._training_metrics_enabled = telemetry
+        self._performance_inference_sampling = await asyncio.gather(
+            *(
+                engine.inference_engine_actor.performance_sampling.remote(temperature)
+                for engine in self.inference_engine_client.engines
+            )
+        )
         return await asyncio.to_thread(
             ray.get,
             self.policy_model.async_run_ray_method(
@@ -577,6 +586,7 @@ class PerformanceTrainer(RayPPOTrainer):
             ),
             "applied_updates": self._performance_applied_updates,
             "synthetic_advantages": self._performance_fixed_advantages,
+            "inference_sampling": getattr(self, "_performance_inference_sampling", None),
         }
         return result
 
@@ -717,6 +727,50 @@ class PerformanceTrainer(RayPPOTrainer):
                 "same_engine": True,
                 "temperatures": [1.0, 0.7],
                 "tokens_text_heads_scores_exact": True,
+            }
+            for temperature in (1.0, 0.7):
+                await self.settings(128, False, temperature=temperature)
+                body = {
+                    "model": self.inference_engine_client.model_name,
+                    "messages": list(self.train_dataset[0][0]),
+                    EXACT_PROMPT_TOKEN_IDS_KEY: self.prompts[0],
+                    "return_token_ids": True,
+                    "return_tokens_as_token_ids": True,
+                    "logprobs": True,
+                    "top_logprobs": 129,
+                    "max_completion_tokens": 128,
+                    "ignore_eos": True,
+                    "seed": 7782,
+                    "temperature": temperature,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "min_p": 0.0,
+                }
+                await engine.inference_engine_actor.performance_id_only_heads.remote(True)
+                await engine.chat_completion({"json": dict(body), "headers": {"x-request-id": f"warm-{temperature}"}})
+                await engine.inference_engine_actor.performance_id_only_heads.remote(False)
+                old_chat = await engine.chat_completion(
+                    {"json": dict(body), "headers": {"x-request-id": f"decoded-{temperature}"}}
+                )
+                await engine.inference_engine_actor.performance_id_only_heads.remote(True)
+                new_chat = await engine.chat_completion(
+                    {"json": dict(body), "headers": {"x-request-id": f"id-only-{temperature}"}}
+                )
+                old_choice, new_choice = old_chat["choices"][0], new_chat["choices"][0]
+                assert old_choice["token_ids"] == new_choice["token_ids"]
+                assert old_choice["message"] == new_choice["message"]
+                assert old_choice[CHOICE_POLICY_STEPS_KEY] == new_choice[CHOICE_POLICY_STEPS_KEY]
+                old_rows, new_rows = old_choice["logprobs"]["content"], new_choice["logprobs"]["content"]
+                assert [row["logprob"] for row in old_rows] == [row["logprob"] for row in new_rows]
+                assert [select_chat_response_topk(row["top_logprobs"], 128) for row in old_rows] == [
+                    select_chat_response_topk(row["top_logprobs"], 128) for row in new_rows
+                ]
+            self.probe["qualification"]["native_chat_id_only_parity"] = {
+                "same_engine": True,
+                "temperatures": [1.0, 0.7],
+                "tokens_message_source_steps_chosen_and_head_scores_exact": True,
+                "sampled_bytes_unused": True,
+                "inference_sampling": self._performance_inference_sampling,
             }
             self.save_probe()
         await self.settings(128, True)

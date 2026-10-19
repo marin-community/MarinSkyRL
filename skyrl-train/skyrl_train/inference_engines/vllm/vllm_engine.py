@@ -1961,6 +1961,20 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             raise RuntimeError("Expert-block sync installs weights only while generation is paused")
         return list(await engine.collective_rpc("expert_block_rpc", args=(method, *args)))
 
+    async def performance_sampling(self, temperature):
+        self._openai_sampling_params["temperature"] = temperature
+        return {key: self._openai_sampling_params.get(key) for key in ("temperature", "top_p", "top_k", "min_p")}
+
+    async def performance_id_only_heads(self, enabled):
+        class IgnoreRegistrations(set):
+            def add(self, value):
+                pass
+
+        assert not self._id_only_logprob_requests
+        requests = set() if enabled else IgnoreRegistrations()
+        self._id_only_logprob_requests = requests
+        self.openai_serving_chat.id_only_logprob_requests = requests
+
     async def performance_memory(self, reset=False):
         from skyrl_train.entrypoints.score_centering_performance import host_memory
 
