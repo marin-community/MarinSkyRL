@@ -708,6 +708,7 @@ def test_teacher_credit_follows_environment_normalization_and_loop_credit(
 
 def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_tokenizer):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.all_metrics = {}
     trainer.cfg = dummy_config
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer.tokenizer = dummy_tokenizer
@@ -738,6 +739,7 @@ def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
     chosen_teacher_evidence,
 ):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.all_metrics = {}
     trainer.cfg = dummy_config
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer.tokenizer = dummy_tokenizer
@@ -771,6 +773,7 @@ def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
 
 def test_topk_teacher_evidence_is_collated_without_dense_vocabulary_tensors(dummy_config, dummy_tokenizer):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.all_metrics = {}
     trainer.cfg = dummy_config
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer.tokenizer = dummy_tokenizer

@@ -217,6 +217,7 @@ def _context(
     batch_policy: BatchPolicy = BatchPolicy.FULL_BATCH,
     order: PromptOrder | None = None,
     payloads: PayloadStore | None = None,
+    request_spec: RolloutRequestSpec | None = None,
 ) -> TrainingContext:
     config = RolloutBufferConfig(batch_size, max_in_flight, max_staleness_steps, batch_policy, None, None)
     return TrainingContext(
@@ -224,7 +225,7 @@ def _context(
         config,
         start_buffer(config),
         CONTENT_POLICY,
-        RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}),
+        request_spec or RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}),
         workers,
         payloads or MemoryPayloads(),
         rollout_spans=False,
@@ -238,6 +239,44 @@ async def _ignore(groups: list[RolloutGroup]) -> None:
 async def _next_uids(context: TrainingContext) -> list[str]:
     groups, _ = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
     return [group.uid for group in groups]
+
+
+@pytest.mark.asyncio
+async def test_periodic_probe_dispatch_is_bounded_across_many_groups_and_repeated_steps(ray_module, start_buffer):
+    requests = []
+
+    class Workers(_Workers):
+        async def run_task(self, task, writer):
+            requests.append(task.request)
+            return await super().run_task(task, writer)
+
+    context = _context(
+        [str(index) for index in range(16)],
+        Workers(),
+        start_buffer,
+        batch_size=3,
+        max_in_flight=3,
+        max_staleness_steps=0,
+        request_spec=RolloutRequestSpec(
+            SAMPLES_PER_PROMPT, {"logprobs": 0}, probe_interval=2, probe_topk=128, probe_tokens=32
+        ),
+    )
+    context.start()
+    try:
+        for step in range(1, 6):
+            await context.publish(step)
+            assert len(await _next_uids(context)) == 3
+        sampled = [request for request in requests if request.score_centering_probe_tokens]
+        assert [request.batch_metadata.global_step for request in sampled] == [1, 3, 5]
+        assert all(
+            request.score_centering_probe_tokens == 32 and request.sampling_params["logprobs"] == 128
+            for request in sampled
+        )
+        assert all(
+            request.sampling_params["logprobs"] == 0 for request in requests if not request.score_centering_probe_tokens
+        )
+    finally:
+        await context.close()
 
 
 @pytest.mark.asyncio
