@@ -1,3 +1,5 @@
+import os
+import select
 from pathlib import Path
 
 import ray
@@ -53,6 +55,21 @@ def fixed_training_batch(model_dir: str) -> TrainingInputBatch:
     return batch
 
 
+class _ConcurrentPolicyWorker(CPUPolicyWorker):
+    def __init__(self, cfg, **kwargs):
+        super().__init__(cfg=cfg, **kwargs)
+        barrier = os.open(Path(cfg.trainer.export_path).parent / "constructor-barrier", os.O_RDWR | os.O_NONBLOCK)
+        try:
+            if self._rank == 0:
+                ready, _, _ = select.select([barrier], [], [], 30)
+                if not ready or os.read(barrier, 1) != b"r":
+                    raise RuntimeError("rank 1 did not release the constructor barrier")
+            else:
+                os.write(barrier, b"r")
+        finally:
+            os.close(barrier)
+
+
 def run_fixed_update(root: Path, model_dir: Path, micro_batch_size: int) -> None:
     cfg = tiny_training_config(
         root,
@@ -67,9 +84,11 @@ def run_fixed_update(root: Path, model_dir: Path, micro_batch_size: int) -> None
     )
     validate_cfg(cfg)
     batch = fixed_training_batch(cfg.trainer.policy.model.path)
+    os.mkfifo(root / "constructor-barrier")
+    barrier_keepalive = os.open(root / "constructor-barrier", os.O_RDWR | os.O_NONBLOCK)
     ray.init(num_cpus=LOGICAL_CPUS, num_gpus=2, runtime_env={"env_vars": WORKER_ENV_VARS}, include_dashboard=False)
     try:
-        workers = PPORayActorGroup(cfg, 1, 2, ray.remote(num_gpus=1)(CPUPolicyWorker))
+        workers = PPORayActorGroup(cfg, 1, 2, ray.remote(num_gpus=1)(_ConcurrentPolicyWorker))
         ray.get(workers.async_init_model(cfg.trainer.policy.model.path, num_training_steps=1))
         output = workers.run_method("mesh", "ppo_train", batch)
         torch.save(output.metadata["train_status"], root / "train_status.pt")
@@ -81,3 +100,4 @@ def run_fixed_update(root: Path, model_dir: Path, micro_batch_size: int) -> None
         workers.kill_actors()
     finally:
         ray.shutdown()
+        os.close(barrier_keepalive)

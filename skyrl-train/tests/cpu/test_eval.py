@@ -3,12 +3,15 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
 import json
+
+import fsspec
 from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationResult
 
+from skyrl_train.io import io
 from skyrl_train.evaluate import _calculate_eval_metrics, evaluate, evaluate_step_wise
 from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
@@ -116,10 +119,27 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("step_wise", [False, True])
-async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config, tmp_path, step_wise):
+@pytest.mark.parametrize(("step_wise", "cloud_output"), [(False, False), (True, False), (False, True)])
+async def test_evaluate_exports_public_results_and_expected_metrics(
+    dummy_config, tmp_path, monkeypatch, step_wise, cloud_output
+):
     cfg = configure_eval(dummy_config, tmp_path)
     cfg.trainer.dump_eval_results = True
+    if cloud_output:
+        cfg.trainer.export_path = f"s3://eval-results/{tmp_path.name}"
+        filesystem = fsspec.filesystem("memory")
+        local_filesystem = io._get_filesystem
+        open_file = io.open_file
+        monkeypatch.setattr(
+            io, "_get_filesystem", lambda path: filesystem if io.is_cloud_path(path) else local_filesystem(path)
+        )
+
+        def open_local_output(path, mode="rb"):
+            if io.is_cloud_path(path) and "w" in mode:
+                raise OSError("This object store supports directory publication")
+            return open_file(path, mode)
+
+        monkeypatch.setattr(io, "open_file", open_local_output)
 
     prompts_batch = [
         {
@@ -213,6 +233,8 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
         assert metrics[key] == pytest.approx(expected_value)
 
     dump = tmp_path / "dumped_evals/global_step_5_evals"
+    if cloud_output:
+        filesystem.get(f"{cfg.trainer.export_path}/dumped_evals/global_step_5_evals/", str(dump), recursive=True)
     saved = "".join(path.read_text() for path in dump.glob("*.jsonl"))
     assert saved
     assert "private-reference" not in saved
