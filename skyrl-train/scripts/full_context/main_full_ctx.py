@@ -20,7 +20,7 @@ class FullCtxPPOExp(BasePPOExp):
         eval_dataset,
         inference_engine_client,
         trajectory_runner,
-        colocate_pg,
+        models,
     ):
         return FullCtxTrainer(
             cfg=cfg,
@@ -30,7 +30,7 @@ class FullCtxPPOExp(BasePPOExp):
             eval_dataset=eval_dataset,
             inference_engine_client=inference_engine_client,
             trajectory_runner=trajectory_runner,
-            colocate_pg=colocate_pg,
+            models=models,
         )
 
 
