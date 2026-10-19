@@ -138,8 +138,8 @@ gradients in bf16. Generation takes about 70% of the step.
 
 ## Training communication
 
-Batch-invariant workers inherit vLLM's one-channel NCCL limit. Megatron policies
-with TP1 and expert TP1 can set a separate training limit:
+Workers with `trainer.algorithm.batch_invariant=true` inherit vLLM's one-channel
+NCCL limit. Megatron policies with TP1 and expert TP1 can set a separate training limit:
 
 ```text
 trainer.algorithm.batch_invariant=true
@@ -160,6 +160,13 @@ records the tested layout, precision, memory costs and numerical checks. Its
 full-Hero measurements carry [#1000](https://github.com/marin-community/MarinSkyRL/pull/1000)
 equally in every arm. They measure learner scoring and updates; rollout and
 weight-transfer throughput require separate measurements.
+
+On full trained Hero, one and eight channels produced identical scores and
+expert choices at each tested batch shape. Both settings changed scores when
+sequences shared a larger forward pass. This option preserves that observed
+baseline behavior; it does not establish exact batch invariance. See the
+[trained-model qualification](https://marin-us-east-02a.cwobject.com/marin/users/romain/hero-nccl-invariance-01a13c0f/reports/HERO-NCCL-BATCH-INVARIANCE.md)
+for the mismatch tails, scope and repair checks.
 
 ## Query bias
 
