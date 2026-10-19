@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from skyrl_train.inference_engines.response_topk import (
-    select_chat_response_topk,
     select_flat_response_topk,
     select_response_topk,
 )
@@ -66,23 +65,3 @@ def test_invalid_scores_fail_closed(scores):
 def test_missing_candidates_fail_closed():
     with pytest.raises(ValueError, match="fewer response candidates"):
         select_response_topk({2: -0.1}, 2)
-
-
-@pytest.mark.parametrize("candidate_bytes", [None, list(b"display metadata")])
-def test_chat_candidates_use_exact_token_ids_and_discard_extra_sampled_token(candidate_bytes):
-    ids, scores = select_chat_response_topk(
-        [
-            {"token": "token_id:9", "logprob": -7.0, "bytes": candidate_bytes},
-            {"token": "token_id:3", "logprob": -0.2, "bytes": candidate_bytes},
-            {"token": "token_id:2", "logprob": -0.1, "bytes": candidate_bytes},
-        ],
-        2,
-    )
-    assert ids == [2, 3]
-    assert scores == [-0.1, -0.2]
-
-
-@pytest.mark.parametrize("token", ["hello", "token_id:٣"])
-def test_chat_candidates_reject_decoded_strings(token):
-    with pytest.raises(ValueError, match="exact token IDs"):
-        select_chat_response_topk([{"token": token, "logprob": -0.1}], 1)

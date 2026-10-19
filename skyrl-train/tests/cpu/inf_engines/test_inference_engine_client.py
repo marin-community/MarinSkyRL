@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.inference_engines.base import CHOICE_POLICY_STEPS_KEY, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.response_topk import CHAT_TOPK_WIDTH_KEY, CHOICE_TOPK_KEY, ResponseTopK
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
     create_app,
@@ -610,7 +611,8 @@ async def test_draft_refresh_retains_per_engine_exceptions() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exact_prompt", [None, [1, 2, 3, 4, 5]])
-async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_prompt):
+@pytest.mark.parametrize("compact", [False, True])
+async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_prompt, compact):
     """
     First response aborts with tokens; second aborts with 0 tokens (ignored);
     third finishes. Assert:
@@ -703,6 +705,16 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
             return deepcopy(self.responses[idx])
 
     engines = [MockEngine()]
+    if compact:
+        for response in engines[0].responses:
+            choice = response["choices"][0]
+            tokens = choice["token_ids"]
+            choice["logprobs"] = None
+            choice[CHOICE_TOPK_KEY] = ResponseTopK(
+                [-0.1] * len(tokens),
+                np.asarray([[token, token - 8] for token in tokens], dtype=np.int32).reshape(-1, 2),
+                np.asarray([[-0.1, -0.2]] * len(tokens), dtype=np.float32).reshape(-1, 2),
+            )
     cfg = _make_min_cfg()
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
 
@@ -720,6 +732,8 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
     }
     if exact_prompt is not None:
         original["json"]["_skyrl_exact_prompt_token_ids"] = exact_prompt
+    if compact:
+        original[CHAT_TOPK_WIDTH_KEY] = 2
 
     out = await client.chat_completion(original)
 
@@ -732,6 +746,8 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
     # First call should be identical to original json (no continuation flags)
     assert first_call["json"] == {**original["json"], "return_token_ids": True}
     assert first_call["headers"] == original["headers"]
+    if compact:
+        assert all(call[CHAT_TOPK_WIDTH_KEY] == 2 for call in engines[0].calls)
     assert first_call["json"].get("continue_final_message") is None
     assert first_call["json"].get("add_generation_prompt") is None
     assert first_call["json"]["messages"] == [{"role": "user", "content": "Hi"}]
@@ -761,9 +777,16 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
     choice = out["choices"][0]
     assert choice["finish_reason"] == "stop"
     assert choice["message"]["content"] == "AB"
-    assert len(choice["logprobs"]["content"]) == 2
-    assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
-    assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
+    if compact:
+        assert choice["logprobs"] is None
+        selected = choice[CHOICE_TOPK_KEY]
+        assert selected.sampled_logprobs == [-0.1, -0.1]
+        np.testing.assert_array_equal(selected.topk_indices, [[11, 3], [12, 4]])
+        np.testing.assert_allclose(selected.topk_logprobs, [[-0.1, -0.2]] * 2, rtol=0, atol=1e-7)
+    else:
+        assert len(choice["logprobs"]["content"]) == 2
+        assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
+        assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
     assert choice["token_ids"] == [11, 12]
     assert choice[CHOICE_POLICY_STEPS_KEY] == [7, 8]
 

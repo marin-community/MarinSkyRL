@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Any, NamedTuple, Protocol
+from typing import NamedTuple, Protocol
 
 import numpy as np
+
+
+# These fields travel only over the native Python/Ray chat boundary.
+CHAT_TOPK_WIDTH_KEY = "response_topk_width"
+CHOICE_TOPK_KEY = "response_topk"
 
 
 class FlatResponseLogprobs(Protocol):
@@ -82,18 +87,3 @@ def select_response_topk(logprobs: Mapping[int, float], top_k: int) -> tuple[lis
         raise ValueError("vLLM returned fewer response candidates than the requested top-K")
     selected = sorted(candidates, key=lambda item: (-item[1], item[0]))[:top_k]
     return [token_id for token_id, _ in selected], [score for _, score in selected]
-
-
-def select_chat_response_topk(items: list[dict[str, Any]], top_k: int) -> tuple[list[int], list[float]]:
-    """Read vLLM's exact ``token_id:N`` chat representation, never decoded text."""
-    scores = {}
-    for item in items:
-        token = item.get("token")
-        suffix = token[9:] if isinstance(token, str) and token.startswith("token_id:") else ""
-        if not suffix or not suffix.isascii() or not suffix.isdecimal():
-            raise ValueError("chat response top-K omitted exact token IDs")
-        token_id = int(suffix)
-        if token_id in scores:
-            raise ValueError("chat response top-K repeated a token ID")
-        scores[token_id] = item.get("logprob")
-    return select_response_topk(scores, top_k)

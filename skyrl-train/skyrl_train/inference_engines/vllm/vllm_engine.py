@@ -69,7 +69,13 @@ from skyrl_train.inference_engines.base import (
     LORA_DISK_LOAD_NAME,
     LORA_DISK_PATH_KEY,
 )
-from skyrl_train.inference_engines.response_topk import select_flat_response_topk, select_response_topk
+from skyrl_train.inference_engines.response_topk import (
+    CHAT_TOPK_WIDTH_KEY,
+    CHOICE_TOPK_KEY,
+    select_flat_response_topk,
+    select_response_topk,
+)
+from skyrl_train.inference_engines.vllm.compact_chat import CompactChatEngineClient
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
@@ -1430,10 +1436,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
 
         if "rope_scaling" in kwargs:
             kwargs.pop("rope_scaling")
+        self._id_only_logprob_requests: set[str] = set()
         self.llm = self._create_engine(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm)
         self._policy_steps = PolicyStepStamps()
-        self._id_only_logprob_requests: set[str] = set()
         self.openai_serving_chat.id_only_logprob_requests = self._id_only_logprob_requests
         self._stamp_engine_steps()
 
@@ -1714,8 +1720,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             **wrapper_kwargs,
         )
         online_renderer.warmup()
+        self._compact_chat_engine = CompactChatEngineClient(engine, self._id_only_logprob_requests)
         self.openai_serving_chat = SkyRLOpenAIServingChat(
-            engine_client=engine,
+            engine_client=self._compact_chat_engine,
             models=models,
             response_role="assistant",
             online_renderer=online_renderer,
@@ -1992,6 +1999,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         headers = request_payload.get("headers", {})
         request_id = headers.get("x-request-id") or uuid4().hex
         exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
+        compact_top_k = request_payload.get(CHAT_TOPK_WIDTH_KEY)
 
         # Apply configured sampling params from generator config.
         # Harbor requests may include their own sampling params; we override
@@ -2005,6 +2013,21 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             else:
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
+            if compact_top_k is not None:
+                if (
+                    endpoint != "/chat/completions"
+                    or exact_prompt_token_ids is None
+                    or (request.n or 1) != 1
+                    or not isinstance(compact_top_k, int)
+                    or compact_top_k <= 0
+                    or not request.logprobs
+                    or request.logprob_token_ids
+                    or request.use_beam_search
+                ):
+                    raise ValueError("Compact heads require an exact-token, single-response native chat request")
+                # vLLM still renders and parses the complete chat response. Its
+                # public engine client collects the head without display objects.
+                request = request.model_copy(update={"logprobs": False, "top_logprobs": 0})
         except Exception as e:
             return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
 
@@ -2016,9 +2039,15 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 if exact_prompt_token_ids is None:
                     generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
                 else:
-                    generator = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
-                        request, minimal_request, exact_prompt_token_ids
-                    )
+                    if compact_top_k is None:
+                        generator = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
+                            request, minimal_request, exact_prompt_token_ids
+                        )
+                    else:
+                        with self._compact_chat_engine.capture(compact_top_k) as capture:
+                            generator = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
+                                request, minimal_request, exact_prompt_token_ids
+                            )
                 assert isinstance(generator, (ChatCompletionResponse, ErrorResponse))
             else:
                 generator = await self.openai_serving_completion.create_completion(request, minimal_request)
@@ -2029,6 +2058,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 response["error_category"] = "server_error"
                 return response
             choice = response["choices"][0]
+            if compact_top_k is not None:
+                if capture.response is None or capture.response[0] != choice.get("token_ids"):
+                    raise ValueError("Compact chat evidence does not match the served response token IDs")
+                choice[CHOICE_TOPK_KEY] = capture.response[1]
             # vLLM generates a chat completion under its response id, which parallel samples share.
             if (
                 endpoint == "/chat/completions"

@@ -21,6 +21,7 @@ from verifyit.spec import FunctionCall, PredictedActionSpec, StructuredExactSpec
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
 from skyrl_train.inference_engines.chat_continuation import render_exact_chat_continuation
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
+from skyrl_train.inference_engines.response_topk import CHAT_TOPK_WIDTH_KEY, CHOICE_TOPK_KEY, ResponseTopK
 from skyrl_train.trajectory_runners.model_clients import ContextLengthExceededError, DirectModelClient, ModelServerError
 
 
@@ -521,25 +522,12 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
                 "finish_reason": "stop",
                 "token_ids": [9, 10],
                 "provider_specific_fields": {"routed_experts": _encoded_routes([[[1, 2]], [[3, 4]], [[4, 7]]])},
-                "logprobs": {
-                    "content": [
-                        {
-                            "logprob": -7.0,
-                            "top_logprobs": [
-                                {"token": "token_id:9", "logprob": -7.0},
-                                {"token": "token_id:3", "logprob": -0.2},
-                                {"token": "token_id:2", "logprob": -0.1},
-                            ],
-                        },
-                        {
-                            "logprob": -0.1,
-                            "top_logprobs": [
-                                {"token": "token_id:10", "logprob": -0.1},
-                                {"token": "token_id:11", "logprob": -0.2},
-                            ],
-                        },
-                    ]
-                },
+                "logprobs": None,
+                CHOICE_TOPK_KEY: ResponseTopK(
+                    [-7.0, -0.1],
+                    np.asarray([[2, 3], [10, 11]], dtype=np.int32),
+                    np.asarray([[-0.1, -0.2], [-0.1, -0.2]], dtype=np.float32),
+                ),
             }
         ]
     }
@@ -554,10 +542,12 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     )
 
     body = engine.chat_completion.await_args.args[0]["json"]
-    assert body["top_logprobs"] == 3
+    assert body["top_logprobs"] == 2
     assert body["return_tokens_as_token_ids"] is True
-    assert output["student_topk_indices"] == [[[2, 3], [10, 11]]]
-    assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
+    assert engine.chat_completion.await_args.args[0][CHAT_TOPK_WIDTH_KEY] == 2
+    np.testing.assert_array_equal(output["student_topk_indices"], [[[2, 3], [10, 11]]])
+    np.testing.assert_allclose(output["behavior_topk_logprobs"], [[[-0.1, -0.2], [-0.1, -0.2]]], rtol=0, atol=1e-7)
+    assert output["response_logprobs"] == [[-7.0, -0.1]]
     np.testing.assert_array_equal(output["routed_experts"][0], [[[3, 4]], [[4, 7]]])
     assert output["routed_experts"][0].dtype == np.uint8
 

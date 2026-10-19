@@ -19,6 +19,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     is_engine_error_response,
 )
 from skyrl_train.inference_engines.chat_template import template_error_from_exception
+from skyrl_train.inference_engines.response_topk import CHAT_TOPK_WIDTH_KEY, CHOICE_TOPK_KEY, ResponseTopK
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from copy import deepcopy
@@ -725,7 +726,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             logger.debug("/chat/completions request sent (including potential retries): {}", cur_request_json)
             try:
                 partial_response = await self.engines[engine_idx].chat_completion(
-                    {"json": cur_request_json, "headers": headers}
+                    {**original_request_payload, "json": cur_request_json, "headers": headers}
                 )
             except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
                 self._mark_engine_dead(engine_idx, e)
@@ -779,6 +780,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     partial_response=partial_response,
                     accum=accum,
                     response_role=response_role,
+                    response_top_k=original_request_payload.get(CHAT_TOPK_WIDTH_KEY),
                 )
             )
 
@@ -1300,6 +1302,7 @@ class AccumulatedResponse:
     completion_tokens: int = 0
     routed_experts: np.ndarray | None = None
     route_prompt_ids: List[int] | None = None
+    response_topk: List[ResponseTopK] = field(default_factory=list)
 
 
 def _prepare_retry_request(
@@ -1376,6 +1379,7 @@ def _parse_partial_response_and_inplace_update_accum(
     partial_response: Dict[str, Any],
     accum: AccumulatedResponse,
     response_role: Optional[str],
+    response_top_k: int | None,
 ) -> tuple[str, Optional[str], Optional[str], bool]:
     """Parse the partial response and in-place update accumulators.
 
@@ -1399,6 +1403,18 @@ def _parse_partial_response_and_inplace_update_accum(
     # If aborted without generating tokens, ignore this partial response.
     aborted_without_generating = finish_reason == ABORT_FINISH_REASON and new_completion_tokens == 0
     if not aborted_without_generating:
+        if response_top_k is not None:
+            selected = choice.get(CHOICE_TOPK_KEY)
+            shape = (new_completion_tokens, response_top_k)
+            if (
+                selected is None
+                or len(choice.get("token_ids", [])) != new_completion_tokens
+                or len(selected.sampled_logprobs) != new_completion_tokens
+                or selected.topk_indices.shape != shape
+                or selected.topk_logprobs.shape != shape
+            ):
+                raise ValueError("Compact response top-K capture is incomplete across chat retries")
+            accum.response_topk.append(selected)
         provider_fields = choice.get("provider_specific_fields") or {}
         routes = choice.get("routed_experts") or provider_fields.get("routed_experts")
         if routes is not None or accum.routed_experts is not None:
@@ -1462,6 +1478,12 @@ def _build_final_response(
         final_choice["token_ids"] = accum.token_ids
     if final_choice.get(CHOICE_POLICY_STEPS_KEY) is not None:
         final_choice[CHOICE_POLICY_STEPS_KEY] = accum.policy_steps
+    if accum.response_topk:
+        final_choice[CHOICE_TOPK_KEY] = ResponseTopK(
+            [value for chunk in accum.response_topk for value in chunk.sampled_logprobs],
+            np.concatenate([chunk.topk_indices for chunk in accum.response_topk]),
+            np.concatenate([chunk.topk_logprobs for chunk in accum.response_topk]),
+        )
     if accum.routed_experts is not None:
         route_buffer = io.BytesIO()
         np.save(route_buffer, accum.routed_experts)
