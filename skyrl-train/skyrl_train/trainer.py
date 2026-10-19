@@ -363,10 +363,9 @@ def build_models(
 
     Args:
         policy_pg: Optional placement group reserved before inference startup for the policy
-            and colocated reference actors. Otherwise actors reserve their group lazily.
+            and colocated reference actors. When absent, model actors reserve their placement group lazily.
     """
     _, total_training_steps = _training_schedule(cfg, len(train_dataset))
-    policy_model = critic_model = ref_model = None
     pg = None
 
     use_ref_model = reference_model_required(cfg.trainer.algorithm)
@@ -472,7 +471,7 @@ def build_models(
         # the dedicated policy PG uses per-GPU {GPU:1} bundles (each actor
         # then owns one bundle == one GPU, so ray.get_gpu_ids()[0] is a
         # distinct, reliable physical id even when the SIF Ray leaves
-        # CUDA_VISIBLE_DEVICES unmasked).
+        # CUDA_VISIBLE_DEVICES unmasked). Off otherwise → unchanged pinning.
         _policy_pin_to_ray_gpu_id = policy_pg is not None and policy_per_gpu_bundles_enabled(cfg)
         # Deterministic forced-CVD-mask pin (opt-in; default false). Only
         # meaningful alongside the per-GPU-bundle pin. Masks each policy
