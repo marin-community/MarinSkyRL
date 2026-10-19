@@ -45,6 +45,7 @@ checkpoint_export:
 trainer:
   score_centering_performance:
     workload: null
+    scope: full
     variant: null
     output_uri: null
     candidate: null
