@@ -258,7 +258,7 @@ class DirectModelClient:
             if sampling_params.get("logprobs") is not None:
                 body["logprobs"] = True
             if requested_top_k is not None:
-                body["top_logprobs"] = requested_top_k
+                body["top_logprobs"] = requested_top_k + 1
                 body["return_tokens_as_token_ids"] = True
             request_id = uuid4().hex
             headers = {"x-request-id": request_id}

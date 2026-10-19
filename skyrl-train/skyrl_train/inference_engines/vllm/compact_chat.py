@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from skyrl_train.inference_engines.response_topk import ResponseTopK, select_flat_response_topk
+from skyrl_train.inference_engines.response_topk import ResponseTopK, select_flat_chat_response_topk
 
 
 @dataclass
@@ -48,7 +48,7 @@ class CompactChatEngineClient:
         capture = self._capture.get()
         if capture is not None:
             sampling_params = sampling_params.clone()
-            sampling_params.logprobs = capture.top_k
+            sampling_params.logprobs = capture.top_k + 1
             sampling_params.flat_logprobs = True
             self._id_only_requests.add(request_id)
         try:
@@ -60,7 +60,7 @@ class CompactChatEngineClient:
                         response = output.outputs[0]
                         response_ids = list(response.token_ids)
                         if response_ids:
-                            selected = select_flat_response_topk(response.logprobs, response_ids, capture.top_k)
+                            selected = select_flat_chat_response_topk(response.logprobs, response_ids, capture.top_k)
                         else:
                             # Weight publication can abort a request before its first token.
                             selected = ResponseTopK(
