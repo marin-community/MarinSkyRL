@@ -37,8 +37,9 @@ filter, or non-teacher baseline does not add a sixth method.
    tokens in a specified context and the student learns from a soft-target KL
    loss (Hinton et al., 2015, *Distilling the Knowledge in a Neural Network*).
    This requires aligned teacher probability distributions, not merely a saved
-   action trace; it is a **separate method**, not implemented by Pi's
-   teacher-trace SFT or the shared Pi scenario launch.
+   action trace; it is a **separate method**. SkyRL already has a vLLM teacher
+   oracle, routed scoring runtime, and top-K distillation losses. Pi has not
+   yet connected its student trials to that existing path.
 3. **Evaluate — AI-judged GRPO.** Independent student trajectories receive
    post-trial scores from a judge LLM for group-relative RL (`rlaif_pi_base`;
    Lee et al., 2023, *RLAIF*; Shao et al., 2024, *DeepSeekMath*). Judge request
@@ -63,7 +64,7 @@ launch presets. Method 1's ungraded managed-GPU smoke reached one real SFT
 optimizer step and saved a tokenizer-bearing step-1 checkpoint; its verified
 filter has CPU admission tests but no GPU smoke. Methods 3–5 have constructed
 CPU evidence/ETL contracts but fail shared-engine objective preflight;
-method 2 needs its own probability-scoring path rather than a Pi trace.
+method 2 needs a Pi-to-existing-teacher-scoring adapter rather than a Pi trace.
 See [Pi scenario smoke gates](../pi-scenario-smokes.md) for launch artifacts
 and the distinction between a CPU fixture and a physical GPU trial.
 
@@ -112,7 +113,13 @@ revision, source kind, and (for external vLLM) authenticated endpoint. DAgger
 and critique remain blocked; ungraded teacher-trace SFT has completed one
 real managed-GPU trainer step, but the other target methods have not.
 The older Harbor trajectory runner's teacher, critique, RLAIF and
-replay adapters were not rebased into this branch.
+replay adapters were not rebased into this branch. Stay on the current
+`TaskRolloutWorker` / `RolloutEngine` path: upstream now handles typed requests,
+Harbor trial sessions, task/group grading, retries, policy-step metadata,
+and pooled inline evaluation. The Pi adapter should supply only Pi-specific
+attributed evidence and objective selection. The worker's existing
+`JudgeConnection` is a task-grading transport, not yet a separately attributed
+post-trial AI-judge result; do not relabel its verifier score as RLAIF.
 
 `skyrl_train.rollouts.pi_scenario_etl` starts with a strict versioned envelope
 and a pure `scenario.preset` → typed evidence → training-row transformation.
@@ -209,7 +216,7 @@ weights or use the training teacher as a validation actor.
 | Target method | Evidence/objective boundary | Current test and launch gate |
 | --- | --- | --- |
 | 1. Teacher trace imitation | Teacher-authored executed actions and tool observations; retokenize with the student tokenizer for SFT. Never synthesize student behavior logprobs for teacher tokens. | Pinned Qwen/Docker and CPU trainer tests; **one managed-GPU optimizer step and tokenizer-bearing checkpoint passed** for ungraded SFT. Verified-only admission is CPU-tested, not GPU-tested. Separate live student evaluation and restart remain. |
-| 2. Teacher distribution distillation | Score tokens on exact student contexts and support for soft-target KL; an action trace alone is insufficient. | No shared Pi scoring launch or matching-distribution smoke. This is a separate path, not teacher-trace SFT. |
+| 2. Teacher distribution distillation | Route exact student-token contexts into SkyRL's existing `VLLMTeacherOracle` / `DistillationRuntime` and top-K loss; an action trace or sampled-token logprobs alone is insufficient. | Generic vLLM teacher scoring and KL have CPU tests; Pi has no reviewed distillation preset, connected scoring smoke, or GPU update. This is not teacher-trace SFT. |
 | 3. AI-judged GRPO | Student-only attributed turns, followed by a distinct judge request, score and provenance. Optimize a physical group on **judge** scores, not Harbor verifier rewards. | Constructed CPU ETL contract. The shared worker has no post-trial judge transport, so `rlaif_pi_base` fails launch preflight; no physical judged-GRPO optimizer step. |
 | 4. DAgger action correction | Pi selects teacher/student **before** sampling; retain private teacher labels, selected executed action and observations with authorship. Retokenize correction labels for SFT; preserve replay checkpoint state. | Harbor pre-action routing and constructed CPU ETL tests for turn mixture and prefix takeover. Shared-worker live objective/source routing and replay restart are not wired. |
 | 5. Teacher critique → student revision | Keep the teacher's private feedback distinct from the executed student revision; supervise the revision against the separate task-verifier verdict. | Harbor feedback transport and constructed CPU revision masking tests. No wired shared-engine trainer objective or live rollout smoke. |
@@ -322,9 +329,15 @@ checkpoint restart, separate student evaluation, or learning improvement.
    and shared engine on CPU, then validate its own trainer update, GPU serving,
    restart and (where appropriate) separate student evaluation. The ungraded
    teacher trace has passed only the first GPU optimizer-step gate.
-5. Build teacher distribution scoring and aligned soft-target KL separately
-   from action-trace collation; a Pi SFT checkpoint is not distribution
-   distillation evidence.
+5. Adapt Pi student trial rows to the existing routed `DistillationRuntime`
+   and `VLLMTeacherOracle`, with a pinned teacher and matching tokenizer,
+   stable trajectory IDs, masked tool/context tokens, and a reviewed
+   `topk_distribution` objective. The Pi HTTP bridge currently exposes only
+   sampled-token logprobs and returns empty `top_logprobs`; student-selected
+   top-K needs an additional aligned transport before using that variant.
+   Test the connected scoring and optimizer path before a GPU smoke. Do not
+   duplicate SkyRL's teacher scorer or KL loss: a Pi SFT checkpoint is not
+   distribution-distillation evidence.
 
 The original pre-shared-engine prototype is preserved at the local
 `backup/pi-scenarios-before-shared-port` ref. It is a source of tests and
