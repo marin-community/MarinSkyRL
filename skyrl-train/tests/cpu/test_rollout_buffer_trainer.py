@@ -1,4 +1,5 @@
 import asyncio
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -24,9 +25,17 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
     return RolloutGroup(batch, uid, policy_step, {"uid": uid})
 
 
-@pytest.mark.parametrize("reason", ["initial", "training_step"])
+@pytest.mark.parametrize(
+    ("reason", "paused_on_entry", "expected"),
+    [
+        ("initial", False, ["pause", "sync", ("resume", 5)]),
+        ("initial", True, ["sync", ("resume", 5)]),
+        ("training_step", False, ["pause", "sync", ("resume", 5)]),
+        ("training_step", True, None),
+    ],
+)
 @pytest.mark.parametrize("offload_enabled", [False, True])
-def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
+def test_weight_sync_respects_pause_and_optimizer_offload_policy(reason, paused_on_entry, expected, offload_enabled):
     trainer = object.__new__(RayPPOTrainer)
     trainer.cfg = get_default_config()
     trainer.cfg.trainer.offload_optimizer_during_rollouts = offload_enabled
@@ -45,11 +54,18 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
             events.append("offload")
 
     class Engine:
+        generation_paused_event = Event()
+
         async def pause_generation(self):
+            if self.generation_paused_event.is_set():
+                raise RuntimeError("Generation is already paused")
+            self.generation_paused_event.set()
             events.append("pause")
 
         async def resume_generation(self, policy_step):
+            assert self.generation_paused_event.is_set()
             assert trainer.policy_model.optimizer_on_gpu != offload_enabled
+            self.generation_paused_event.clear()
             events.append(("resume", policy_step))
 
     async def sync_weights():
@@ -57,13 +73,24 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
 
     trainer.policy_model = Policy()
     trainer.inference_engine_client = Engine()
+    if paused_on_entry:
+        trainer.inference_engine_client.generation_paused_event.set()
     trainer.sync_policy_weights_to_inference_engines = sync_weights
+
+    if expected is None:
+        with pytest.raises(RuntimeError, match="Generation is already paused"):
+            asyncio.run(trainer._sync_policy_for_rollouts(reason=reason))
+        assert events == []
+        return
 
     asyncio.run(trainer._sync_policy_for_rollouts(reason=reason))
 
     assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-    # Every sync pauses, and the resume installs the step whose leases the synced weights serve.
-    assert events == ["pause"] + (["offload"] if offload_enabled else []) + ["sync", ("resume", 5)]
+    expected_events = expected.copy()
+    if offload_enabled:
+        expected_events.insert(expected_events.index("sync"), "offload")
+    assert events == expected_events
+    assert not trainer.inference_engine_client.generation_paused_event.is_set()
 
 
 def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch):
