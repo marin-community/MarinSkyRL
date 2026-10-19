@@ -229,8 +229,30 @@ this failure. Manual VM Docker runs now exercise the installed Pi agent through
 the shared worker with real CPU-sampled Qwen tokens, including a pretrained
 Qwen2.5-0.5B tool call, executed tool, separate verifier and ETL. Those
 opt-in tests use the SkyRL CPU engine with a vLLM-compatible HTTP bridge,
-**not** vLLM's CPU runtime or the CoreWeave/Daytona GPU path. Harbor's pinned
-producer now labels malformed evidence by fixed, content-free frame shape
+**not** vLLM's CPU runtime or the CoreWeave/Daytona GPU path; do not use them
+to debug vLLM behavior. A separate manual probe then ran **real vLLM 0.32.0
+on CPU** (pinned `vllm/vllm-openai-cpu` image, independent Qwen3-0.6B weights
+at the student revision, true 8,192 context and 2,048 per-turn cap). Pi ran
+inside the pinned Python task image as an installed agent, talking directly
+to that vLLM's `/tokenize` and `/v1/chat/completions` endpoints—not the SkyRL
+CPU inference bridge. Three separate disposable Docker trials completed two
+turns each. They sampled 1,458 + 446, 670 + 189, and 1,601 + 470 tokens
+respectively, with aligned student logprobs; the second trial executed two
+tool observations for two calls, and the third executed one for one. No raw
+prompt, response, command or stdout was saved. The reusable manual harness is
+`skyrl-train/tests/cpu/rollouts/manual_pi_vllm_docker.py`: point `--task-uri`
+at a **one-row** Harbor task archive parquet, `--image` at the pinned task
+image, `--vllm-base` at a real vLLM server reachable from Docker bridge, and
+`--model` at the served Qwen name. It validates and prints only fixed-schema
+sandbox diagnostics and in-memory counts. The server used pinned CPU image
+`vllm/vllm-openai-cpu@sha256:827ef38187f9b52f2bb838695ef815ec5b65f4bf3e4c061b002b2b0a19cb0701`,
+student weights at `c1899de289a04d12100db370d81485cdf75e47ca`, 8,192
+`max_model_len`, `float32` (this VM's EPYC CPU lacks fast bf16), and
+`--enable-auto-tool-choice --tool-call-parser hermes`. This restores a real
+CPU-vLLM/Pi debugging loop, but vLLM 0.32.0 is **not** Marin's pinned GPU
+fork, and local Docker is **not** Daytona's stdout transport; passing these
+trials does not explain the intermittent eight-task GPU frame corruption.
+Harbor's pinned producer now labels malformed evidence by fixed, content-free frame shape
 (missing separator, invalid header, empty or oversized fragment) to locate
 the transport fault on a fresh trial without retaining stdout or leaking task
 content; the earlier failed GPU attempt cannot be classified retroactively. The next
