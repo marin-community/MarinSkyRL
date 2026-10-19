@@ -87,6 +87,7 @@ class _Experiment(BasePPOExp):
         self.cfg.trainer.run_name = "run"
         self.cfg.trainer.logger = "wandb"
         self.trainer = None
+        self.startup_timings = {}
         self.events = events
 
     def _setup_trainer(self, tracker):
