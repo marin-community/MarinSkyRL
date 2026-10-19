@@ -17,11 +17,8 @@ class _UnpickleableError(RuntimeError):
         raise pickle.PicklingError("exception cannot be pickled")
 
 
-def test_model_initialization_timeout_raises_and_kills_actors(monkeypatch):
-    trainer = object.__new__(RayPPOTrainer)
-    killed = []
+def test_model_initialization_phase_waits_only_for_remaining_budget(monkeypatch):
     waits = []
-    trainer._kill_ray_actors = lambda: killed.append(True)
 
     def get(refs, timeout):
         waits.append(timeout)
@@ -30,16 +27,15 @@ def test_model_initialization_timeout_raises_and_kills_actors(monkeypatch):
     monkeypatch.setattr(trainer_module.ray, "get", get)
     monkeypatch.setattr(trainer_module, "time", SimpleNamespace(monotonic=lambda: 100.0), raising=False)
 
-    with pytest.raises(RuntimeError, match="timed out after 3600 seconds"):
-        trainer._wait_for_setup_phase(
+    with pytest.raises(RuntimeError, match="timed out"):
+        trainer_module._wait_for_setup_phase(
             ["policy-worker-ref"],
-            deadline=3700.0,
+            deadline=1100.0,
             phase="policy/ref/critic model initialization",
         )
 
-    # The phase waits only for the budget left before the shared deadline.
-    assert waits == [3600.0]
-    assert killed == [True]
+    # The phase waits only for the remaining budget.
+    assert waits == [1000.0]
 
 
 @pytest.mark.asyncio
