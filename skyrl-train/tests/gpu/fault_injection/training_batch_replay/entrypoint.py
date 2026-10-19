@@ -14,6 +14,7 @@ import ray
 
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.rollouts.context import TrainingContext
+from skyrl_train.trainer import build_models
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import ResumeMode
 from tests.training_batch_replay import (
@@ -102,7 +103,7 @@ def _capture_experiment_class():
             eval_dataset,
             inference_engine_client,
             trajectory_runner,
-            colocate_pg,
+            models,
         ):
             return CapturingRayPPOTrainer(
                 context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner),
@@ -113,7 +114,7 @@ def _capture_experiment_class():
                 eval_dataset=eval_dataset,
                 inference_engine_client=inference_engine_client,
                 trajectory_runner=trajectory_runner,
-                colocate_pg=colocate_pg,
+                models=models,
                 capture_artifact_path=_artifact_path(cfg),
                 capture_provenance=_provenance(cfg),
             )
@@ -128,7 +129,18 @@ def _replay_experiment_class():
         """Build training actors only; never construct rollout/inference engines."""
 
         def _setup_replay_trainer(self):
-            trainer = self.get_trainer(
+            strategy = str(self.cfg.trainer.strategy)
+            models = build_models(
+                self.cfg,
+                self.tokenizer,
+                self.train_dataset,
+                import_worker(strategy, "policy"),
+                import_worker(strategy, "critic"),
+                import_worker(strategy, "ref"),
+                colocate_pg=self.colocate_pg,
+                policy_pg=self.policy_pg,
+            )
+            return self.get_trainer(
                 cfg=self.cfg,
                 tracker=None,
                 tokenizer=self.tokenizer,
@@ -136,16 +148,8 @@ def _replay_experiment_class():
                 eval_dataset=self.eval_dataset,
                 inference_engine_client=None,
                 trajectory_runner=None,
-                colocate_pg=self.colocate_pg,
+                models=models,
             )
-            strategy = str(self.cfg.trainer.strategy)
-            trainer.build_models(
-                import_worker(strategy, "policy"),
-                import_worker(strategy, "critic"),
-                import_worker(strategy, "ref"),
-                policy_pg=self.policy_pg,
-            )
-            return trainer
 
         @staticmethod
         def _load_replay_checkpoint(trainer, provenance: BatchReplayProvenance) -> None:
