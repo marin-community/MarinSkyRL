@@ -27,7 +27,6 @@ from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_serving import rank0_validation_snapshot
 from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.router_replay_fixtures import random_unique_routes
-from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
     RESPONSE_LENGTH,
     _config,
@@ -36,8 +35,6 @@ from tests.gpu.test_grug_megatron import (
 )
 from tests.gpu.utils import init_worker_with_type
 
-NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
-NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
 TOPK = 4
 NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
 NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
