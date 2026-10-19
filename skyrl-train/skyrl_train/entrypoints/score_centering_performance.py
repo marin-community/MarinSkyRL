@@ -87,17 +87,19 @@ def profile_summary(profile):
 
 
 class FixedPromptDataset:
-    def __init__(self, dataset, size):
+    def __init__(self, dataset, size, indices=None):
         self.dataset, self.size = dataset, size
+        self.indices = list(range(size)) if indices is None else indices
+        assert len(self.indices) == size
 
     def __len__(self):
         return self.size
 
     def __getitem__(self, index):
-        return self.dataset[index]
+        return self.dataset[self.indices[index]]
 
     def uid(self, index):
-        return self.dataset.uid(index)
+        return self.dataset.uid(self.indices[index])
 
     def collate_fn(self, rows):
         return self.dataset.collate_fn(rows)
@@ -202,6 +204,17 @@ def reference_forward(worker, data):
 
 
 class PerformanceExp(BasePPOExp):
+    def get_train_dataset(self):
+        dataset = super().get_train_dataset()
+        spec = self.cfg.trainer.score_centering_performance
+        if spec.source_rows is None:
+            return dataset
+        assert len(self.cfg.data.train_data) == 1
+        assert hashlib.sha256(Path(self.cfg.data.train_data[0]).read_bytes()).hexdigest() == spec.source_data_sha256
+        positions = {int(row): index for index, row in enumerate(dataset.dataframe["campaign_source_row"])}
+        indices = [positions[int(row)] for row in spec.source_rows]
+        return FixedPromptDataset(dataset, len(indices), indices)
+
     def get_trainer(self, **kwargs):
         trainer = super().get_trainer(**kwargs)
         trainer.__class__ = PerformanceTrainer
@@ -602,6 +615,12 @@ class PerformanceTrainer(RayPPOTrainer):
             "windows": [],
             "qualification": {},
             "complete": False,
+            "source_selection": {
+                "campaign_source_rows": OmegaConf.to_container(spec.source_rows),
+                "source_data_sha256": spec.source_data_sha256,
+            }
+            if spec.source_rows is not None
+            else None,
         }
         self.probe["runtime"] = {
             "lock_sha256": hashlib.sha256((Path(__file__).resolve().parents[3] / "uv.lock").read_bytes()).hexdigest(),
@@ -772,7 +791,8 @@ class PerformanceTrainer(RayPPOTrainer):
                         ray.get,
                         self.policy_model.async_run_ray_method("pass_through", "performance_check_positions", True),
                     )
-                result = await self.native_window(f"{name}/{repetition}")
+                async with asyncio.timeout(int(spec.window_timeout_seconds)):
+                    result = await self.native_window(f"{name}/{repetition}")
                 assert sorted(result["response_lengths"]) == expected_lengths
                 if name == "probe":
                     assert result["metrics"]["score_centering_probe/sampled_tokens"] > 0
@@ -811,7 +831,8 @@ class PerformanceTrainer(RayPPOTrainer):
             self.probe["native_periodic_windows"] = []
             for index in range(6):
                 await self.settings(0, False)
-                result = await self.native_window(f"native/{index}")
+                async with asyncio.timeout(int(spec.window_timeout_seconds)):
+                    result = await self.native_window(f"native/{index}")
                 observed += int(result["metrics"].get("score_centering_probe/sampled_tokens", 0) > 0)
                 self.probe["native_periodic_windows"].append(result)
                 self.save_probe()
