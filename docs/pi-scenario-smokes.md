@@ -212,6 +212,17 @@ stdout transport and separate-verifier timeouts in disposable CPU sandboxes
 first, without retaining raw Pi stdout or treating diagnostic logs as
 trajectory evidence.
 
+The **next** Pi smoke recipes now set an 8,192-token true request/serving
+window and a 2,048-token per-turn output cap in
+`cloud/iris/configs/pi_{teacher_trace,verifier_grpo}_smoke.yaml`. Their derived
+trainer and agent input allowance is 6,144 tokens; the previous 2,048-token
+window left only 564 slots after the observed 1,484-token first prompt. This
+change has **not** been exercised in a new evaluation or GPU optimizer job.
+Do not reuse the old 256-/512-token launch YAMLs or their attempt IDs/output
+prefixes; ensure fresh launch configs inherit the preset budget without a
+smaller ad-hoc override. The larger budget does not repair corrupt in-memory
+evidence, separate-verifier timeouts, or all-zero GRPO advantage.
+
 Next smoke gates, in order:
 
 1. The saved step-1 student was independently loaded and evaluated against the

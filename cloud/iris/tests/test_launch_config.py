@@ -409,6 +409,14 @@ def test_pi_smoke_recipe_survives_staged_model_and_role_plan(tmp_path: Path, mon
 
     resolved = load_launch_config(path)
 
+    # Keep the true vLLM window, trainer/agent input allowance, and per-turn
+    # generation cap together; a larger output cap alone cannot fit Pi's prompt.
+    assert raw["skyrl"]["context_budget"]["request_window_tokens"] == 8192
+    assert raw["skyrl"]["context_budget"]["max_new_tokens_per_turn"] == 2048
+    assert resolved.skyrl.generator.engine_init_kwargs.max_model_len == 8192
+    assert resolved.skyrl.generator.max_input_length == 6144
+    assert resolved.skyrl.trainer.max_prompt_length == 6144
+    assert resolved.skyrl.generator.sampling_params.max_generate_length == 2048
     assert resolved.skyrl.trainer.policy.model.path == "/tmp/models/qwen"
     assert resolved.skyrl.terminal_bench_config.installed_agent.output_path.startswith("s3://runs/smoke/")
     assert resolved.inputs.data_kind == "tasks"

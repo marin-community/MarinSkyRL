@@ -6,8 +6,8 @@ config_groups:
 scenario:
   preset: teacher_demo_pi_base
 context_budget:
-  request_window_tokens: 2048
-  max_new_tokens_per_turn: 256
+  request_window_tokens: 8192
+  max_new_tokens_per_turn: 2048
   max_turns: 2
 terminal_bench:
   harbor:
