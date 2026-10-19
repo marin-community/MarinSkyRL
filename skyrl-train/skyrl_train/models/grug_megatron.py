@@ -353,7 +353,20 @@ class GrugGPTModel(GPTModel):
         if not apply_embed_norm:
             return outputs
         decoder_input, *rest = outputs
-        return (self.embed_norm(decoder_input), *rest)
+        # The decoder's checkpoint does not cover this normalization. Checkpoint it
+        # separately to save memory by recomputing it during the backward pass.
+        # With frozen embeddings, run it normally so its weights still get gradients:
+        # this checkpoint needs an input with requires_grad=True.
+        if (
+            self.config.recompute_granularity == "full"
+            and self.training
+            and torch.is_grad_enabled()
+            and decoder_input.requires_grad
+        ):
+            normalized = tensor_parallel.checkpoint(self.embed_norm, False, decoder_input)
+        else:
+            normalized = self.embed_norm(decoder_input)
+        return (normalized, *rest)
 
 
 class GrugShortConv(nn.Module):
