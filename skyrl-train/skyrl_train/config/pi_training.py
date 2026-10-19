@@ -2,6 +2,14 @@
 
 from omegaconf import DictConfig, OmegaConf
 
+from marinskyrl.distillation import (
+    DistillationObjectiveKind,
+    DistillationRewardMode,
+    TeacherEvidenceKind,
+    compile_distillation_plan_from_config,
+    validate_distillation_runtime_support,
+)
+
 
 def validate_pi_objective_config(cfg: DictConfig) -> None:
     """Validate a reviewed Pi preset against its mode and training objective."""
@@ -19,6 +27,7 @@ def validate_pi_objective_config(cfg: DictConfig) -> None:
     preset = scenario.preset
     modes = {
         "verifier_grpo_base": "literal",
+        "teacher_distribution_pi_base": "literal",
         "teacher_demo_pi_base": "teacher_trace",
         "teacher_demo_pi_verified_base": "teacher_trace",
     }
@@ -29,20 +38,52 @@ def validate_pi_objective_config(cfg: DictConfig) -> None:
         raise ValueError(f"{preset} requires an installed Pi agent with pi.mode={modes[preset]}")
     if not OmegaConf.select(agent, "kwargs.thinking_format"):
         raise ValueError(f"{preset} requires an explicit Pi thinking_format for the served model")
+    if modes[preset] == "literal":
+        served_model = cfg.generator.engine_init_kwargs.get("served_model_name") or cfg.trainer.policy.model.path
+        if agent.get("model_name") not in (None, f"hosted_vllm/{served_model}"):
+            raise ValueError("Pi student execution must identify the served student model")
+        if cfg.generator.sampling_params.logprobs != 0:
+            raise ValueError("Pi student execution requires sampled-token logprobs from the local inference engine")
     if cfg.trainer.step_wise_training:
         raise ValueError("Pi scenarios require whole-trial training, not step-wise training")
     algorithm = cfg.trainer.algorithm
+    if preset == "teacher_distribution_pi_base":
+        plan = compile_distillation_plan_from_config(cfg)
+        if (
+            plan is None
+            or plan.objective is not DistillationObjectiveKind.SPARSE_FORWARD_KL
+            or plan.reward_mode is not DistillationRewardMode.REPLACE
+            or len(plan.teachers) != 1
+            or len(plan.routing.routes) != 1
+            or plan.teachers[0].evidence is not TeacherEvidenceKind.TOPK_DISTRIBUTION
+            or plan.teachers[0].model.path == cfg.trainer.policy.model.path
+        ):
+            raise ValueError(
+                "Pi distribution requires one independent top-K teacher and sparse forward KL replacing rewards"
+            )
+        validate_distillation_runtime_support(plan)
+        if (
+            algorithm.policy_loss_type != "importance_sampling"
+            or algorithm.advantage_estimator != "uniform"
+            or cfg.generator.n_samples_per_prompt != 1
+        ):
+            raise ValueError("Pi distribution requires the shared top-K objective and one student trial per task")
+    elif algorithm.get("distillation") is not None:
+        raise ValueError("Only the Pi distribution preset may attach teacher-scoring evidence")
     if preset == "verifier_grpo_base":
         if algorithm.advantage_estimator != "grpo" or algorithm.policy_loss_type != "regular":
             raise ValueError("verifier_grpo_base requires GRPO advantages and regular clipped policy loss")
         if cfg.generator.n_samples_per_prompt < 2:
             raise ValueError("verifier_grpo_base requires at least two physical trials per prompt")
-    elif (
+    elif preset != "teacher_distribution_pi_base" and (
         algorithm.policy_loss_type != "sft"
         or algorithm.advantage_estimator != "uniform"
         or cfg.generator.n_samples_per_prompt != 1
     ):
         raise ValueError("Pi teacher trace requires SFT, uniform advantages and one trial per prompt")
+    if preset == "teacher_distribution_pi_base":
+        if OmegaConf.select(cfg, "terminal_bench_config.harbor.verifier_disable") is True:
+            raise ValueError("Pi student distillation requires a separate graded task-verifier outcome")
     if algorithm.dynamic_sampling.type is not None:
         raise ValueError("Pi scenarios do not support dynamic reward-based sampling")
 

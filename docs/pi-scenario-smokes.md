@@ -12,6 +12,24 @@ an optional grading filter on teacher trace, not a sixth method. The
 its judge transport and physical group are not yet wired. The other targets
 are distribution distillation, DAgger correction, and teacher critique →
 student revision; see the [canonical five-method design](design/pi-harbor-migration.md).
+`teacher_distribution_pi_base` also composes through `scenario.preset`, but
+has **no committed GPU launch recipe yet**. It routes graded, student-only Pi
+trials to SkyRL's existing admitted-group top-K teacher scorer and sparse
+forward KL, not to Pi teacher-trace SFT. Only composition and a scripted-oracle
+CPU worker/scoring/gradient contract have passed; do not count them as a live
+vLLM teacher score or a trainer update. Its launch requires one pinned,
+independent `teachers` entry with `topk_distribution`, exactly one route under
+`teacher_routing`, a matching student/teacher tokenizer vocabulary, and separate
+teacher resources. The typed parser compiles the teacher plan before composing
+Hydra scenario defaults: the source recipe must explicitly declare matching
+`trainer.algorithm.distillation` `objective: sparse_forward_kl`,
+`reward_mode: replace`, `routing_plan` and `coefficient`, in addition to the
+scenario selector. Conflicting values fail preflight. The Pi student preset
+requests sampled-token logprobs with
+`sampling_params.logprobs: 0`; positive logprobs (student-selected top-K) still
+lack a Pi HTTP transport. The verifier GRPO preset now requests the same sampled
+logprobs: Pi student evidence otherwise fails closed at collation.
+
 The recipes compose through `scenario.preset`; the example recipes request
 one or two 8×H100 nodes (the second node is the disjoint managed vLLM teacher
 role). Match the
@@ -144,6 +162,25 @@ Sandbox verbose diagnostics stayed off. This establishes a **real, single
 teacher-trace SFT optimizer step**, not student improvement, separate student
 evaluation, live DAgger or a physical verifier GRPO group. No W&B URL appeared
 in the run logs; don't infer a logged W&B run from this smoke.
+
+Next smoke gates, in order:
+
+1. Independently load the saved step-1 student checkpoint and run student-only
+   Harbor evaluation with the shared evaluation runner. Record per-task outcomes
+   separately from the teacher training run; compare to a step-0 student baseline.
+2. Run a physical verifier-GRPO **baseline** group with two independently sampled
+   Pi trials per prompt, exact per-turn sampled logprobs, task-verifier grades,
+   nonzero group advantage and a checkpointed GPU update. Never copy one trial
+   to manufacture a group member.
+3. Before GPU distribution distillation, test an installed Pi student task
+   against a real independently pinned vLLM teacher oracle on CPU/small GPU,
+   with exact token alignment, masked tool context and an actual shared-trainer
+   teacher-loss update. Then do a one-step, disjoint-teacher GPU smoke with a
+   fresh attempt ID and output prefix; do not infer quality improvement.
+4. Only after a separate post-trial judge returns identity, score and provenance
+   without overwriting verifier evidence, run a physical AI-judged GRPO group.
+   DAgger and critique→revision each need their own connected objective/source
+   and restart gates before GPU smoke tests.
   For remote packed task parquets,
   put the URI in the typed launch's `inputs.train_data` as well: the training
   driver stages and extracts that input on each node before SkyRL reads it.

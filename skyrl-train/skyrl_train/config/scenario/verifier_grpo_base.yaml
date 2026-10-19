@@ -9,6 +9,8 @@ trainer:
       type: null
 generator:
   n_samples_per_prompt: 2
+  sampling_params:
+    logprobs: 0
 terminal_bench_config:
   installed_agent:
     agent:

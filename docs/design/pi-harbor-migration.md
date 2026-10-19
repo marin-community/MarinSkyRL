@@ -38,8 +38,10 @@ filter, or non-teacher baseline does not add a sixth method.
    loss (Hinton et al., 2015, *Distilling the Knowledge in a Neural Network*).
    This requires aligned teacher probability distributions, not merely a saved
    action trace; it is a **separate method**. SkyRL already has a vLLM teacher
-   oracle, routed scoring runtime, and top-K distillation losses. Pi has not
-   yet connected its student trials to that existing path.
+   oracle, routed scoring runtime, and top-K distillation losses. The
+   `teacher_distribution_pi_base` preset now selects that shared sparse-forward-KL
+   path for graded student Pi trials; the CPU adapter/scoring contract passes,
+   but no real vLLM Pi distillation trial or GPU optimizer step has passed.
 3. **Evaluate — AI-judged GRPO.** Independent student trajectories receive
    post-trial scores from a judge LLM for group-relative RL (`rlaif_pi_base`;
    Lee et al., 2023, *RLAIF*; Shao et al., 2024, *DeepSeekMath*). Judge request
@@ -59,12 +61,13 @@ filter, or non-teacher baseline does not add a sixth method.
    student's revision against its separate verifier result; teacher feedback
    is neither a verifier reward nor a teacher-authored revision.
 
-Only method 1 and the **non-target** verifier-GRPO baseline have reviewed Pi
-launch presets. Method 1's ungraded managed-GPU smoke reached one real SFT
+Methods 1 and 2 and the **non-target** verifier-GRPO baseline have reviewed Pi
+launch presets. Only method 1's ungraded managed-GPU smoke reached one real
 optimizer step and saved a tokenizer-bearing step-1 checkpoint; its verified
-filter has CPU admission tests but no GPU smoke. Methods 3–5 have constructed
-CPU evidence/ETL contracts but fail shared-engine objective preflight;
-method 2 needs a Pi-to-existing-teacher-scoring adapter rather than a Pi trace.
+filter has CPU admission tests but no GPU smoke. Method 2 has CPU composition,
+Pi worker-to-vLLM-oracle scoring and masked gradient checks, but no physical
+scoring or shared-trainer optimizer step. Methods 3–5 have constructed CPU
+evidence/ETL contracts but fail shared-engine objective preflight.
 See [Pi scenario smoke gates](../pi-scenario-smokes.md) for launch artifacts
 and the distinction between a CPU fixture and a physical GPU trial.
 
@@ -178,9 +181,10 @@ teacher. A later isolated GPU run exercised the managed teacher and distributed
 student policy for **one** ungraded SFT step. Student-only evaluation, verified
 teacher admission on GPU, checkpoint restart, longer-run reliability, and a
 learning-curve comparison remain untested. The current production preflight
-admits `verifier_grpo_base`, `teacher_demo_pi_base`, and
-`teacher_demo_pi_verified_base` with complete source bindings: other Pi ETL
-presets have no wired trainer objective and fail at launch.
+admits `verifier_grpo_base`, `teacher_distribution_pi_base`,
+`teacher_demo_pi_base`, and `teacher_demo_pi_verified_base` with complete
+source bindings: other Pi ETL presets have no wired trainer objective and
+fail at launch.
 It checks selected mode and loss without silently rewriting training settings.
 Managed teachers allocate their own pinned vLLM role with disjoint GPU actors;
 the Iris role plan now reserves a separate whole-node teacher bundle (one extra
@@ -216,7 +220,7 @@ weights or use the training teacher as a validation actor.
 | Target method | Evidence/objective boundary | Current test and launch gate |
 | --- | --- | --- |
 | 1. Teacher trace imitation | Teacher-authored executed actions and tool observations; retokenize with the student tokenizer for SFT. Never synthesize student behavior logprobs for teacher tokens. | Pinned Qwen/Docker and CPU trainer tests; **one managed-GPU optimizer step and tokenizer-bearing checkpoint passed** for ungraded SFT. Verified-only admission is CPU-tested, not GPU-tested. Separate live student evaluation and restart remain. |
-| 2. Teacher distribution distillation | Route exact student-token contexts into SkyRL's existing `VLLMTeacherOracle` / `DistillationRuntime` and top-K loss; an action trace or sampled-token logprobs alone is insufficient. | Generic vLLM teacher scoring and KL have CPU tests; Pi has no reviewed distillation preset, connected scoring smoke, or GPU update. This is not teacher-trace SFT. |
+| 2. Teacher distribution distillation | Use graded student Pi trials with stable IDs and masks; SkyRL's `VLLMTeacherOracle` / `DistillationRuntime` scores the admitted group and attaches teacher top-K evidence to its existing sparse-forward-KL objective. | Reviewed `teacher_distribution_pi_base` composes one distinct pinned teacher, one route, and one student trial. A scripted-oracle CPU test checks the exact Pi worker tokens, context masking and teacher-loss gradient. No live Pi/vLLM scoring, end-to-end shared-trainer update or GPU smoke. |
 | 3. AI-judged GRPO | Student-only attributed turns, followed by a distinct judge request, score and provenance. Optimize a physical group on **judge** scores, not Harbor verifier rewards. | Constructed CPU ETL contract. The shared worker has no post-trial judge transport, so `rlaif_pi_base` fails launch preflight; no physical judged-GRPO optimizer step. |
 | 4. DAgger action correction | Pi selects teacher/student **before** sampling; retain private teacher labels, selected executed action and observations with authorship. Retokenize correction labels for SFT; preserve replay checkpoint state. | Harbor pre-action routing and constructed CPU ETL tests for turn mixture and prefix takeover. Shared-worker live objective/source routing and replay restart are not wired. |
 | 5. Teacher critique → student revision | Keep the teacher's private feedback distinct from the executed student revision; supervise the revision against the separate task-verifier verdict. | Harbor feedback transport and constructed CPU revision masking tests. No wired shared-engine trainer objective or live rollout smoke. |
@@ -251,20 +255,22 @@ tested**. CPU fixtures alone never established production GPU parity.
 
 ## Full-trajectory example coverage and smoke readiness
 
-`tests/cpu/rollouts/test_pi_full_trajectory_examples.py` exercises all seven
+`tests/cpu/rollouts/test_pi_full_trajectory_examples.py` exercises all eight
 Pi ETL preset variants (including the non-target verifier baseline and the
-verified-teacher filter; distribution distillation is not a Pi ETL preset)
+verified-teacher filter; distribution reuses the student-only Pi evidence)
 against one complete file-reading task: a tool request,
 tool observation, final answer, grade, and (where applicable) a private teacher
 label, teacher-executed action, separate post-trial judge, or bounded critique
 and revision. It asserts attribution, prefix/context masks, and reward-source
 selection. These are constructed contract examples: the served IDs/logprobs and
 chat-template fixture are **not sampled by a model**, and teacher/judge identities
-are fixture data, not authenticated endpoints. All seven pass in CPU ETL. Six
+are fixture data, not authenticated endpoints. All eight pass in CPU ETL. Six
 also pass the pinned Harbor producer-envelope validation, `TaskRolloutWorker`
 assembly and production trainer collation, advantages, objective and backward;
-verifier GRPO and teacher trace additionally run a tiny Qwen forward and
-optimizer step on their complete worker-derived batches. RLAIF instead fails
+the distribution case separately passes the worker and the generic vLLM
+teacher-scoring, masking and loss-gradient path with scripted scores. Verifier
+GRPO and teacher trace additionally run a tiny Qwen forward and optimizer
+step on their complete worker-derived batches. RLAIF instead fails
 closed at the shared worker: Pi's producer envelope has no post-trial judge
 field and the worker currently sets `judge=None`. The separate opt-in Docker
 test passes an installed Pi *single-turn, multi-token* real-policy trial, graded
@@ -298,8 +304,9 @@ it is **not** a running GPU vLLM server.
 
 Teacher trace has tested CPU source routing for both types and launch now
 selects a validated independent teacher and separate student-only evaluator.
-The two runnable objectives have three reviewed Hydra presets: verifier GRPO,
-unfiltered teacher SFT, and grader-gated teacher SFT. The Iris composer selects
+Three objectives have four reviewed Hydra presets: verifier GRPO,
+unfiltered teacher SFT, grader-gated teacher SFT, and teacher-top-K distribution
+distillation. Only unfiltered teacher SFT has passed a GPU optimizer step. The Iris composer selects
 one with `scenario.preset`.
 AI-judged GRPO has constructed ETL, but the shared worker has no attached
 post-trial judge. DAgger mixture/takeover and critique→revision have CPU
@@ -319,11 +326,13 @@ checkpoint restart, separate student evaluation, or learning improvement.
    teacher modes; extend to executed multi-tool responses and a DAgger
    student/teacher transition, with no private label in the next student
    context and **no cross-log joins**.
-2. Extend the connected shared installed-agent runtime to teacher/judge modes
-   and adapt whole-task projections to each distinct objective; assert exact loss
-   masks, student-tokenizer labels, group admission and replay checkpoint state.
-3. Extend the Iris `scenario.preset` composer beyond verifier and teacher only
-   as each objective acquires complete source routing and a CPU end-to-end test.
+2. Keep Pi's attributed trial collation in Harbor and route its student batches
+   through the shared grader, admitted-group teacher scorer and objective stack.
+   Judge/DAgger/critique still need their own provenance, source routing,
+   group admission and (where applicable) replay checkpoint state.
+3. Extend the Iris `scenario.preset` composer beyond verifier, teacher SFT and
+   distribution only as each objective acquires complete source routing and
+   a CPU end-to-end test.
    Conflicting manual knobs and unsupported sources must fail before workers.
 4. Exercise each target method through the **installed pinned Harbor package**
    and shared engine on CPU, then validate its own trainer update, GPU serving,
@@ -335,7 +344,8 @@ checkpoint restart, separate student evaluation, or learning improvement.
    `topk_distribution` objective. The Pi HTTP bridge currently exposes only
    sampled-token logprobs and returns empty `top_logprobs`; student-selected
    top-K needs an additional aligned transport before using that variant.
-   Test the connected scoring and optimizer path before a GPU smoke. Do not
+   The scripted teacher-oracle CPU gradient contract has passed; next test a
+   real Pi/vLLM scoring pass and a shared-trainer update before a GPU smoke. Do not
    duplicate SkyRL's teacher scorer or KL loss: a Pi SFT checkpoint is not
    distribution-distillation evidence.
 

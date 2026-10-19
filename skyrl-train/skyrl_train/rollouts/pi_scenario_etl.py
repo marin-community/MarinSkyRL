@@ -29,6 +29,7 @@ def _token_ids(ids: Any) -> tuple[int, ...]:
 
 class PiScenario(StrEnum):
     VERIFIER_GRPO = "verifier_grpo_base"
+    DISTRIBUTION = "teacher_distribution_pi_base"
     RLAIF = "rlaif_pi_base"
     TEACHER_TRACE = "teacher_demo_pi_base"
     TEACHER_TRACE_VERIFIED = "teacher_demo_pi_verified_base"
@@ -474,6 +475,8 @@ def scenario_training_rows(
             reward = float(trial.judge.score)
         else:
             if trial.judge is not None:
+                if scenario is PiScenario.DISTRIBUTION:
+                    raise ValueError("Pi distribution must not contain a judge result")
                 raise ValueError("Verifier GRPO must not substitute a teacher judgment")
             reward = trial.verifier_reward
         rows = [_student_trajectory_row(turns, reward, trial.verifier_reward)]

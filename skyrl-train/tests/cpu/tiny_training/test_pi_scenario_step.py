@@ -45,6 +45,8 @@ def _config(preset: str):
         force_add=True,
     )
     cfg.generator.n_samples_per_prompt = 1 if teacher else 2
+    if not teacher:
+        cfg.generator.sampling_params.logprobs = 0
     cfg.generator.max_turns = 2 if teacher else 1
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine_tensor_parallel_size = 1

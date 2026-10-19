@@ -21,9 +21,10 @@ def _recipe(tmp_path, preset):
     raw["data"]["train_data"] = ["fixture-task"]
     raw["data"]["terminal_bench_data"] = []
     raw["generator"]["trajectory_retention"] = {"output_path": str(tmp_path / "trials")}
+    model = "teacher" if preset.startswith("teacher_demo") else "Qwen/Qwen2.5-1.5B-Instruct"
     raw["terminal_bench"] = {
         "installed_agent": {
-            "agent": {"model_name": "hosted_vllm/teacher", "kwargs": {"thinking_format": "qwen-chat-template"}}
+            "agent": {"model_name": f"hosted_vllm/{model}", "kwargs": {"thinking_format": "qwen-chat-template"}}
         }
     }
     path = tmp_path / "pi.yaml"
@@ -45,7 +46,16 @@ def test_verifier_preset_selects_pi_grpo_without_manual_objective(tmp_path):
     assert cfg.terminal_bench_config.installed_agent.agent.pi.mode == "literal"
     assert cfg.trainer.algorithm.policy_loss_type == "regular"
     assert cfg.generator.n_samples_per_prompt == 2
+    assert cfg.generator.sampling_params.logprobs == 0
     assert cfg.trainer.algorithm.dynamic_sampling.type is None
+
+
+def test_pi_student_preset_rejects_missing_sampled_vllm_scores(tmp_path):
+    raw, path = _recipe(tmp_path, "verifier_grpo_base")
+    raw["generator"]["sampling_params"]["logprobs"] = None
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="sampled-token logprobs"):
+        _compose(path)
 
 
 def test_teacher_preset_selects_ungraded_sft_and_independent_source(tmp_path):
@@ -78,6 +88,53 @@ def test_teacher_preset_selects_ungraded_sft_and_independent_source(tmp_path):
     assert teacher.execution is RoleExecution.LOCAL
     assert teacher.colocation_group == "teacher:pi_trace"
     assert teacher.num_nodes == 1
+    assert derive_num_nodes(plan) == 2
+
+
+def test_distribution_preset_uses_shared_topk_scoring_and_teacher_role(tmp_path):
+    raw, path = _recipe(tmp_path, "teacher_distribution_pi_base")
+    del raw["generator"]["n_samples_per_prompt"]
+    del raw["trainer"]["algorithm"]["advantage_estimator"]
+    raw["teachers"] = {
+        "independent": {
+            "source": "local_inference",
+            "placement": "pinned",
+            "model": {"path": "Qwen/independent-teacher", "revision": "pinned-revision"},
+            "backend": "vllm",
+            "evidence": "topk_distribution",
+            "top_k": 2,
+            "resources": {
+                "num_nodes": 1,
+                "gpus_per_node": 8,
+                "tensor_parallel_size": 8,
+                "data_parallel_size": 1,
+                "expert_parallel_size": 1,
+                "colocation_group": "teacher:independent",
+            },
+        }
+    }
+    raw["teacher_routing"] = {
+        "pi": {"revision": "r1", "routes": {"default": {"teacher": "independent", "weight": 1.0}}}
+    }
+    raw["trainer"]["algorithm"]["distillation"] = {
+        "objective": "sparse_forward_kl",
+        "reward_mode": "replace",
+        "routing_plan": "pi",
+        "coefficient": 1.0,
+    }
+    path.write_text(yaml.safe_dump(raw))
+
+    cfg = _compose(path)
+
+    assert cfg.scenario.preset == "teacher_distribution_pi_base"
+    assert cfg.terminal_bench_config.installed_agent.agent.pi.mode == "literal"
+    assert cfg.terminal_bench_config.installed_agent.get("teacher") is None
+    assert cfg.trainer.algorithm.distillation.objective == "sparse_forward_kl"
+    assert cfg.trainer.algorithm.distillation.reward_mode == "replace"
+    assert cfg.generator.sampling_params.logprobs == 0
+    assert cfg.generator.n_samples_per_prompt == 1
+    plan = derive_role_plan(OmegaConf.to_container(cfg, resolve=True))
+    assert plan.claim("teacher:independent").execution is RoleExecution.LOCAL
     assert derive_num_nodes(plan) == 2
 
 

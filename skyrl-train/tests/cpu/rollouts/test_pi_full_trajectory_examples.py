@@ -7,6 +7,7 @@ and finishes with a user-facing answer (or a bounded critique/revision).
 """
 
 import json
+import math
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -16,9 +17,15 @@ from transformers import AutoModelForCausalLM
 from harbor.models.agent.pi_trajectory import PiCollatedTrajectory
 from taskcompendium.grading_result import GradeResult, Outcome
 
+from marinskyrl.distillation import DistillationObjectiveKind, TeacherEvidenceKind
+from skyrl_train.config.objective_spec import TopKLossParams
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.distillation import prepare_teacher_topk, student_topk_logprobs
+from skyrl_train.distillation_adapters import build_teacher_scoring_work
+from skyrl_train.inference_engines.vllm_teacher_oracle import VLLMTeacherOracle, tokenizer_vocabulary_fingerprint
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
+from skyrl_train.objective.teacher import mask_teacher_evidence, topk_teacher_loss
 from skyrl_train.objective.reduction import step_counts
 from skyrl_train.rollouts.pi_scenario_etl import (
     PiScenario,
@@ -225,6 +232,117 @@ def test_full_task_trial_selects_only_its_own_evidence_and_objective(scenario):
             assert batch["rewards"][0][-1] == batch["unshaped_rewards"][0]
 
 
+@pytest.mark.asyncio
+async def test_pi_student_trial_reuses_exact_vllm_teacher_scoring_and_masks_tool_context(task_inputs):
+    """Score the graded Pi trial's executed student tokens, not a retokenized teacher action."""
+    raw = example_trial(PiScenario.DISTRIBUTION)
+    cfg = get_default_config()
+    worker = TaskRolloutWorker(
+        cfg.generator,
+        WholeTaskProjection(cfg.generator, PrefixTokenizer()),
+        InferenceClient(),
+        {},
+        pi_scenario={"preset": PiScenario.DISTRIBUTION.value},
+        shutdown_timeout=1,
+    )
+    trajectory = PiCollatedTrajectory.model_validate(
+        {
+            key: raw.get(key)
+            for key in (
+                "schema_version",
+                "trial_id",
+                "policy_step",
+                "turns",
+                "planned_executors",
+                "critique_feedback",
+                "critique",
+            )
+        }
+    ).model_dump(mode="json")
+    output = PiRolloutData(
+        task_id="settings-task",
+        messages=(),
+        prompt_token_ids=(1,),
+        response_token_ids=(999,),
+        loss_mask=(1,),
+        logprobs=(-0.25,),
+        grade=GradeResult(Outcome.GRADED, raw["verifier_reward"], passed=raw["verifier_passed"]),
+        stop_reason="stop",
+        pi_trajectory=trajectory,
+        session_id=raw["trial_id"],
+    )
+    request = TaskRequestBatch(
+        rows=task_inputs[1].rows,
+        trajectory_ids=(TrajectoryID("settings-task", 0),),
+        batch_metadata=BatchMetadata(global_step=3, training_phase="train"),
+    )
+    batch = await worker.training_batch(request, [output])
+    assert batch["loss_masks"] == [[1, 0, 0, 1]]
+    assert batch["unshaped_rewards"] == [1.0]
+    assert batch["teacher_evidence"] is None  # Attached by the admitted-group scorer, never by Harbor's verifier.
+    assert batch["rollout_logprobs"][0].tolist() == [-0.25, 0.0, 0.0, -0.25]
+
+    class Tokenizer:
+        def get_vocab(self):
+            return {str(index): index for index in range(256)}
+
+    class Engine:
+        def __init__(self):
+            self.sequence = None
+
+        def get_model_max_len(self):
+            return 2048
+
+        async def generate(self, request):
+            self.sequence = request["prompt_token_ids"][0]
+            return {
+                "prompt_logprobs": [
+                    [None] + [{token: math.log(0.8), (token + 1) % 256: math.log(0.2)} for token in self.sequence[1:]]
+                ]
+            }
+
+    tokenizer = Tokenizer()
+    engine = Engine()
+    oracle = VLLMTeacherOracle(
+        engine,
+        teacher_id="independent",
+        teacher_revision="pinned-revision",
+        tokenizer=tokenizer,
+        evidence_kind=TeacherEvidenceKind.TOPK_DISTRIBUTION,
+    )
+    work = build_teacher_scoring_work(
+        batch,
+        route_ids=("default",),
+        teacher_id="independent",
+        tokenizer_fingerprint=tokenizer_vocabulary_fingerprint(tokenizer),
+        plan_version="routing-v1",
+        coefficient=1.0,
+        route_weights=(1.0,),
+        evidence=TeacherEvidenceKind.TOPK_DISTRIBUTION,
+        top_k=2,
+    )
+    evidence = await oracle.score(work.request)
+    scored = prepare_teacher_topk(
+        work.request, evidence, coefficient=work.coefficient, route_weights=work.route_weights
+    )
+    masked = mask_teacher_evidence(scored, torch.tensor(batch["loss_masks"]))
+    assert engine.sequence == [*batch["prompt_token_ids"][0], *batch["response_ids"][0]]
+    assert masked.valid_mask.tolist() == [[True, False, False, True]]
+    logits = torch.zeros((1, 4, 256), requires_grad=True)
+    selected = student_topk_logprobs(logits, masked.teacher_topk_indices)
+    loss = topk_teacher_loss(
+        masked,
+        selected,
+        TopKLossParams(DistillationObjectiveKind.SPARSE_FORWARD_KL, 0.2, 0.2, 3),
+        vocabulary_size=256,
+    )
+    loss.values.sum().backward()
+    assert torch.isfinite(logits.grad).all()
+    assert logits.grad[0, 0].abs().sum() > 0
+    assert logits.grad[0, 3].abs().sum() > 0
+    assert not logits.grad[0, 1:3].any()
+
+
 def test_teacher_trace_retokenizes_executed_tool_json_without_changing_sampled_evidence():
     raw = example_trial(PiScenario.TEACHER_TRACE)
     sampled_call = raw["turns"][0]["executed"]["assistant"]["tool_calls"][0]["function"]
@@ -244,7 +362,7 @@ def test_teacher_trace_retokenizes_executed_tool_json_without_changing_sampled_e
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", list(PiScenario))
+@pytest.mark.parametrize("scenario", [method for method in PiScenario if method is not PiScenario.DISTRIBUTION])
 async def test_complete_trial_worker_to_trainer_or_fails_closed_on_missing_judge(scenario, tmp_path, task_inputs):
     """Test installed Harbor envelope, shared worker, and production trainer collation.
 
