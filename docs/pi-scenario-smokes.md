@@ -4,13 +4,22 @@ These are **integration gates**, not model-quality runs. Use the typed Iris laun
 with the source recipes in `cloud/iris/configs/pi_verifier_grpo_smoke.yaml` and
 `pi_teacher_trace_smoke.yaml`. Do not submit either recipe as a standalone Iris
 job: the launcher supplies the pinned model source, staged local path, placement,
-checkpoint paths, and immutable run/attempt identifiers. The recipes compose
-through `scenario.preset`; the example recipes request one or two 8×H100
-nodes (the second node is the disjoint managed vLLM teacher role). Match the
+checkpoint paths, and immutable run/attempt identifiers. These recipes cover
+**one of the five target methods** (teacher trace imitation under Demonstrate)
+and a **non-target task-verifier GRPO baseline**. Verified-only teacher SFT is
+an optional grading filter on teacher trace, not a sixth method. The
+**Evaluate** target is *AI-judged* GRPO (`rlaif_pi_base`), not verifier GRPO;
+its judge transport and physical group are not yet wired. The other targets
+are distribution distillation, DAgger correction, and teacher critique →
+student revision; see the [canonical five-method design](design/pi-harbor-migration.md).
+The recipes compose through `scenario.preset`; the example recipes request
+one or two 8×H100 nodes (the second node is the disjoint managed vLLM teacher
+role). Match the
 typed launch's node shape to the target cluster: `cw-us-east-08a` currently
 has **4×GB200**, not 8×H100, so set `generator.num_inference_engines: 4`,
 `trainer.placement.policy_num_gpus_per_node: 4`, and allocate 4×GB200 per
-node there. Earlier isolated GPU teacher attempts have not completed an optimizer step.
+node there. Earlier isolated GPU teacher attempts failed; `attempt-13` later
+completed the first optimizer step (recorded below).
 
 Before composing a typed launch config, set:
 

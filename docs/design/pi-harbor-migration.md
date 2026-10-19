@@ -2,7 +2,8 @@
 
 Harbor/Pi owns one live task trajectory and collates **one complete, attributed
 trial payload in memory**: visited states, sampled responses and exact token
-IDs/logprobs, separately attributed executed responses, tool observations,
+IDs (plus sampled logprobs for student behavior, not teacher SFT), separately
+attributed executed responses, tool observations,
 private teacher labels and student-visible
 feedback. Harbor validates the Pi payload; when task verification is enabled,
 the grader returns a separate verdict. The rollout worker binds verification
@@ -20,37 +21,51 @@ session, which attaches it directly to the graded `PiRolloutData`. The worker
 verifies its Pi-bound trial ID and policy step against the lease, then adds
 an explicit graded or skipped verification status before scenario ETL.
 
-## Scenario families
+## Five target methods, grouped under four themes
 
-- **Demonstrate:** A teacher runs the task and the student imitates its
-  action trace with SFT (`teacher_demo_pi_base`); explanatory text may be
-  part of that trace, but the objective supervises actual teacher-authored
-  tokens (Hsieh et al., 2023, *Distilling Step-by-Step*). Teacher
-  **distribution** distillation instead requires teacher token probabilities
-  for a specified context and a soft-target KL objective (Hinton et al.,
-  2015, *Distilling the Knowledge in a Neural Network*). A saved trace alone
-  does not provide those probabilities; it is not the Pi SFT scenario.
-- **Evaluate:** Independent student trajectories receive post-trial scores
-  from an AI judge for group-relative RL (`rlaif_pi_base`; Lee et al., 2023,
-  *RLAIF*; Shao et al., 2024, *DeepSeekMath*). Judge provenance and scores
-  remain distinct from executable verifier rewards. The current
-  `verifier_grpo_base` uses **only** Harbor verifier scores; it is a working
-  baseline, not an AI-judged GRPO smoke.
-- **Correct:** At a student-visited state, the teacher labels a corrected
-  action and the student SFT objective learns that label (DAgger turn mixture
-  or prefix takeover; Ross et al., 2011, *DAgger*; Li et al., 2026,
-  *Revisiting DAgger in the Era of LLM-Agents*). The correction must retain
-  teacher authorship; it is not a sampled student response.
-- **Critique and revise:** A teacher sends private critique of a student
-  attempt; the student then revises before the verifier scores the revision
-  (`critique_revision_pi_base`; Bai et al., 2022, *Constitutional AI*;
-  Madaan et al., 2023, *Self-Refine*). Teacher feedback is not itself a
-  verifier reward or a teacher-authored revision.
+This is the canonical **five-method** list. A launch preset, optional grading
+filter, or non-teacher baseline does not add a sixth method.
 
-Only verifier GRPO and teacher trace SFT are wired for a launch. The other
-families have constructed CPU evidence contracts but deliberately fail shared-
-engine objective preflight. The short GPU smoke recipes and their required
-artifacts are described in [Pi scenario smoke gates](../pi-scenario-smokes.md).
+1. **Demonstrate — teacher trace imitation.** The teacher runs the task;
+   student-tokenizer SFT supervises its executed action trace. Step-by-step
+   explanations may be part of that trace (Hsieh et al., 2023, *Distilling
+   Step-by-Step*). `teacher_demo_pi_base` is the ungraded preset;
+   `teacher_demo_pi_verified_base` optionally filters teacher trials using a
+   separate task verifier. Both implement this **same method**. Only the
+   ungraded preset has completed a managed GPU optimizer-step smoke.
+2. **Demonstrate — teacher distribution distillation.** The teacher scores
+   tokens in a specified context and the student learns from a soft-target KL
+   loss (Hinton et al., 2015, *Distilling the Knowledge in a Neural Network*).
+   This requires aligned teacher probability distributions, not merely a saved
+   action trace; it is a **separate method**, not implemented by Pi's
+   teacher-trace SFT or the shared Pi scenario launch.
+3. **Evaluate — AI-judged GRPO.** Independent student trajectories receive
+   post-trial scores from a judge LLM for group-relative RL (`rlaif_pi_base`;
+   Lee et al., 2023, *RLAIF*; Shao et al., 2024, *DeepSeekMath*). Judge request
+   identity, score and provenance must stay separate from task-verifier
+   rewards. `verifier_grpo_base` uses **only** Harbor task-verifier scores: it
+   is a useful baseline, **not** this method or its initial-PR smoke.
+4. **Correct — DAgger action correction.** At a student-visited state, a
+   teacher labels the corrected action; student-tokenizer SFT learns that
+   label (Ross et al., 2011, *DAgger*; Li et al., 2026, *Revisiting DAgger in
+   the Era of LLM-Agents*). Turn mixture and prefix takeover are two executor
+   schedules for this **one method**, not extra scenarios. The label retains
+   teacher authorship and is not sampled student behavior.
+5. **Critique and revise — teacher critique, student revision.** The teacher
+   privately critiques the student's attempt; the student revises before the
+   task verifier scores it (`critique_revision_pi_base`; Bai et al., 2022,
+   *Constitutional AI*; Madaan et al., 2023, *Self-Refine*). Supervise only the
+   student's revision against its separate verifier result; teacher feedback
+   is neither a verifier reward nor a teacher-authored revision.
+
+Only method 1 and the **non-target** verifier-GRPO baseline have reviewed Pi
+launch presets. Method 1's ungraded managed-GPU smoke reached one real SFT
+optimizer step and saved a tokenizer-bearing step-1 checkpoint; its verified
+filter has CPU admission tests but no GPU smoke. Methods 3–5 have constructed
+CPU evidence/ETL contracts but fail shared-engine objective preflight;
+method 2 needs its own probability-scoring path rather than a Pi trace.
+See [Pi scenario smoke gates](../pi-scenario-smokes.md) for launch artifacts
+and the distinction between a CPU fixture and a physical GPU trial.
 
 ## Task ingestion boundary
 
@@ -94,7 +109,8 @@ multi-turn prefix assembly, or realistic model quality. A separate Qwen2.5
 multi-turn Docker probe below covers real tool execution. The installed worker
 now accepts `teacher_trace` only with an independently bound teacher model,
 revision, source kind, and (for external vLLM) authenticated endpoint. DAgger
-and critique remain blocked; a distributed trainer update has not passed.
+and critique remain blocked; ungraded teacher-trace SFT has completed one
+real managed-GPU trainer step, but the other target methods have not.
 The older Harbor trajectory runner's teacher, critique, RLAIF and
 replay adapters were not rebased into this branch.
 
@@ -108,8 +124,9 @@ installed runtime passes it to `TaskRolloutWorker.training_batch` in memory.
 CPU fixtures exercise the producer schema from the **installed pin** and the
 worker's graded batch conversion; the opt-in Docker tests separately cover the
 Harbor trial producer (scripted, negative-prefix test) and the installed-agent
-shared-worker consumer (real sampled tokens), but not a trainer update. Multi-turn
-GRPO assembles one whole-trial row, masking observed
+shared-worker consumer (real sampled tokens). The subsequent isolated managed
+GPU ungraded-teacher run also completed one optimizer step. Multi-turn GRPO
+assembles one whole-trial row, masking observed
 context tokens; if successive exact served prefixes do not align it fails
 closed rather than training on separate per-turn GRPO rows. Teacher trace
 likewise assembles one physical SFT row per trial in the student tokenizer,
@@ -150,7 +167,9 @@ opt-in Docker probe now runs Pi `teacher_trace` with Qwen2.5 teacher completions
 a tiny student tokenizer/model, a real bash observation, and production SFT
 backward/optimizer step. Both a SkyRL-owned CPU inference engine and an
 authenticated separate vLLM-wire HTTP fixture pass; neither is a deployed GPU
-teacher. Distributed policy workers, GPU parity, checkpoint restart and a
+teacher. A later isolated GPU run exercised the managed teacher and distributed
+student policy for **one** ungraded SFT step. Student-only evaluation, verified
+teacher admission on GPU, checkpoint restart, longer-run reliability, and a
 learning-curve comparison remain untested. The current production preflight
 admits `verifier_grpo_base`, `teacher_demo_pi_base`, and
 `teacher_demo_pi_verified_base` with complete source bindings: other Pi ETL
@@ -162,9 +181,10 @@ the Iris role plan now reserves a separate whole-node teacher bundle (one extra
 and require no Iris GPU allocation. The trainer's validation worker
 uses a separate literal Pi configuration bound to the **student** inference
 engine. A separate opt-in tiny-policy Docker test passes the literal student
-through the physical Harbor evaluation path under the teacher preset. The source
-is **code-wired, not production-smoke validated**; do not
-interpret a CPU Qwen endpoint fixture as vLLM or distributed parity.
+through the physical Harbor evaluation path under the teacher preset. That
+separate **student-only evaluation** is code-wired and CPU-tested but has not
+run on the GPU step-1 checkpoint; do not infer student improvement from a
+teacher SFT optimizer step.
 
 Set `scenario.preset: teacher_demo_pi_base` for SFT without grading, or
 `teacher_demo_pi_verified_base` for correct-only SFT. The preset also selects
@@ -186,21 +206,21 @@ teacher weights are synced to the policy; separate Ray GPU actors are allocated
 and cleaned up after training. Do not point the teacher binding at the student
 weights or use the training teacher as a validation actor.
 
-| Scenario | Harness / Harbor | Trainer-side CPU result | Remaining design gate |
-| --- | --- | --- | --- |
-| Verifier GRPO | Single-turn tiny Qwen and two-turn real Qwen2.5 (bash tool, Docker, grade, exact prefix, sampled IDs/logprobs, trainer input) passed. | Full two-turn constructed envelope → shared worker → two-trial GRPO advantages, objective, tiny-Qwen backward and optimizer step passed. | Production vLLM tool-parser/template parity, distributed policy worker, physical GRPO group and checkpoint restart. |
-| Teacher trace SFT | Real pinned Qwen2.5 teacher sampled a two-turn tool trajectory through Pi/Docker using both managed CPU and authenticated external vLLM-wire sources, distinct from the tiny student. | Shared worker retokenized executed teacher actions into one SFT row; production trainer collated, computed advantages, and stepped the tiny student's optimizer. Ungraded and verified-only admission have CPU contract tests. | Run ungraded SFT and a separate live student-only evaluation with GPU vLLM and distributed workers; checkpoint restart and weight provenance remain unverified. |
+| Target method | Evidence/objective boundary | Current test and launch gate |
+| --- | --- | --- |
+| 1. Teacher trace imitation | Teacher-authored executed actions and tool observations; retokenize with the student tokenizer for SFT. Never synthesize student behavior logprobs for teacher tokens. | Pinned Qwen/Docker and CPU trainer tests; **one managed-GPU optimizer step and tokenizer-bearing checkpoint passed** for ungraded SFT. Verified-only admission is CPU-tested, not GPU-tested. Separate live student evaluation and restart remain. |
+| 2. Teacher distribution distillation | Score tokens on exact student contexts and support for soft-target KL; an action trace alone is insufficient. | No shared Pi scoring launch or matching-distribution smoke. This is a separate path, not teacher-trace SFT. |
+| 3. AI-judged GRPO | Student-only attributed turns, followed by a distinct judge request, score and provenance. Optimize a physical group on **judge** scores, not Harbor verifier rewards. | Constructed CPU ETL contract. The shared worker has no post-trial judge transport, so `rlaif_pi_base` fails launch preflight; no physical judged-GRPO optimizer step. |
+| 4. DAgger action correction | Pi selects teacher/student **before** sampling; retain private teacher labels, selected executed action and observations with authorship. Retokenize correction labels for SFT; preserve replay checkpoint state. | Harbor pre-action routing and constructed CPU ETL tests for turn mixture and prefix takeover. Shared-worker live objective/source routing and replay restart are not wired. |
+| 5. Teacher critique → student revision | Keep the teacher's private feedback distinct from the executed student revision; supervise the revision against the separate task-verifier verdict. | Harbor feedback transport and constructed CPU revision masking tests. No wired shared-engine trainer objective or live rollout smoke. |
 
-The migration must establish these *separate* evidence flows:
-
-| Scenario | Required shared-engine evidence and objective |
-| --- | --- |
-| Verifier GRPO | Student-only Pi turns with Pi-collated sampled evidence; Harbor verifier grade remains the optimization reward. |
-| Teacher trace imitation | Teacher-authored task turns with a canonical actor field, no student behavior logprobs on teacher turns. Student-tokenizer SFT rows, optional grader-gated admission, and separate student-only evaluation. |
-| AI-judged GRPO | Student-only attributed turns, then a post-trial judge; record its structured score, request identity and provenance separately from Harbor's verifier grade. Group and optimize complete student trials only. |
-| DAgger turn mixture / prefix takeover | Pi selects the actor **before** sampling an entire response. Its single collated trial contains exact visited context, private teacher label, selected executable response and observations with authorship. Retokenize teacher labels with the student tokenizer for SFT; do not treat them as behavior-policy tokens. Preserve bounded replay and its checkpoint state. |
-| Critique → revision | Pi-collated student attempt and tool observations, private teacher request, only labeled feedback in the subsequent student context, then a distinct student revision. Mask all but revision tokens and use the separate Harbor verifier grade, not the teacher's opinion, as reward. |
-| Teacher distribution distillation | A separate token-scoring path over exact student contexts and support, not a Pi plugin, trace or judge score. Use the existing distillation objective only when matching teacher distributions are actually available. |
+`verifier_grpo_base` is a **non-target baseline**: real pinned-Qwen Docker
+single- and two-turn policy/tool trials and a **constructed** two-trial CPU
+GRPO optimizer test passed, using Harbor verifier rewards. Constructed trials
+do not establish a physical sampled group; no physical GPU GRPO group or vLLM
+tool-template parity check has passed, and the baseline cannot
+stand in for method 3's AI judge. The verified-only teacher SFT preset and
+both DAgger executor schedules likewise do not add methods to the list.
 
 For DAgger and teacher demonstrations, Harbor's pre-sampling controller
 selects the actor and Pi produces the complete trial-local evidence. The
@@ -217,21 +237,23 @@ per-trial plans. The launch coordinator now creates an independent literal
 student evaluation runner rather than using the teacher's inference backend.
 The external endpoint's revision is **declared provenance**, not remote weight
 attestation; `/models` checks its alias/context/auth but cannot prove the
-remote weight hash. The managed engine is requested with the pinned model path
-and revision, but no live GPU load/checkpoint-restart has yet been observed.
-CPU probes
-are not a production trainer run or GPU parity.
+remote weight hash. The managed engine loaded and sampled on GPU for the
+ungraded teacher SFT smoke, which saved a step-1 student checkpoint; **loading
+that saved checkpoint and independently evaluating the student have not been
+tested**. CPU fixtures alone never established production GPU parity.
 
 ## Full-trajectory example coverage and smoke readiness
 
-`tests/cpu/rollouts/test_pi_full_trajectory_examples.py` exercises all six
-reviewed ETL presets against one complete file-reading task: a tool request,
+`tests/cpu/rollouts/test_pi_full_trajectory_examples.py` exercises all seven
+Pi ETL preset variants (including the non-target verifier baseline and the
+verified-teacher filter; distribution distillation is not a Pi ETL preset)
+against one complete file-reading task: a tool request,
 tool observation, final answer, grade, and (where applicable) a private teacher
 label, teacher-executed action, separate post-trial judge, or bounded critique
 and revision. It asserts attribution, prefix/context masks, and reward-source
 selection. These are constructed contract examples: the served IDs/logprobs and
 chat-template fixture are **not sampled by a model**, and teacher/judge identities
-are fixture data, not authenticated endpoints. All six pass in CPU ETL. Five
+are fixture data, not authenticated endpoints. All seven pass in CPU ETL. Six
 also pass the pinned Harbor producer-envelope validation, `TaskRolloutWorker`
 assembly and production trainer collation, advantages, objective and backward;
 verifier GRPO and teacher trace additionally run a tiny Qwen forward and
@@ -272,13 +294,16 @@ selects a validated independent teacher and separate student-only evaluator.
 The two runnable objectives have three reviewed Hydra presets: verifier GRPO,
 unfiltered teacher SFT, and grader-gated teacher SFT. The Iris composer selects
 one with `scenario.preset`.
-RLAIF, both DAgger variants and critique→revision have ETL/producer contracts
-but still fail objective preflight: none has complete per-trial source routing,
-judge transport or replay checkpoint state in the shared worker. Online DPO
+AI-judged GRPO has constructed ETL, but the shared worker has no attached
+post-trial judge. DAgger mixture/takeover and critique→revision have CPU
+producer/ETL contracts, but lack complete live source routing, reviewed
+trainer objectives, and (for DAgger) replay checkpoint state. All fail
+objective preflight. Online DPO
 remains an older-runner prototype, not a Pi shared-engine objective. Do not
 copy the legacy Hydra groups over: they use `scenario.kind` and the retired
-runner, not the current hydrated trial. Distributed trainer updates,
-checkpoint restart and GPU serving are still separate gates.
+runner, not the current hydrated trial. The successful ungraded teacher GPU
+step does **not** establish the remaining target methods' distributed updates,
+checkpoint restart, separate student evaluation, or learning improvement.
 
 ## Port and release gates
 
@@ -293,9 +318,13 @@ checkpoint restart and GPU serving are still separate gates.
 3. Extend the Iris `scenario.preset` composer beyond verifier and teacher only
    as each objective acquires complete source routing and a CPU end-to-end test.
    Conflicting manual knobs and unsupported sources must fail before workers.
-4. Exercise each method through the **installed pinned Harbor package** and the
-   shared engine on CPU, then test trainer updates/checkpoint restart and GPU
-   serving separately.
+4. Exercise each target method through the **installed pinned Harbor package**
+   and shared engine on CPU, then validate its own trainer update, GPU serving,
+   restart and (where appropriate) separate student evaluation. The ungraded
+   teacher trace has passed only the first GPU optimizer-step gate.
+5. Build teacher distribution scoring and aligned soft-target KL separately
+   from action-trace collation; a Pi SFT checkpoint is not distribution
+   distillation evidence.
 
 The original pre-shared-engine prototype is preserved at the local
 `backup/pi-scenarios-before-shared-port` ref. It is a source of tests and
