@@ -221,9 +221,9 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
     client input limit therefore reserves the complete per-turn output allowance.
     """
     _validate_no_derived_context_fields(raw, config_path)
-    for field in ("session", "overrides"):
-        if "max_turns" in raw.get("environment", {}).get("task_sessions", {}).get(field, {}):
-            raise ValueError(f"{config_path}: set max_turns only in context_budget, not task session {field}")
+    for section in ("session", "overrides"):
+        if "max_turns" in raw.get("environment", {}).get("task_sessions", {}).get(section, {}):
+            raise ValueError(f"{config_path}: set max_turns only in context_budget, not task session {section}")
     config = raw.get("context_budget")
     if not isinstance(config, dict):
         raise ValueError(f"{config_path}: context_budget must be a mapping")
