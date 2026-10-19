@@ -25,11 +25,9 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_serving import rank0_validation_snapshot
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
-    NUM_EXPERTS,
-    NUM_LAYERS,
-    _write_tiny_checkpoint,
     RESPONSE_LENGTH,
     _config,
     _padded_batch,
@@ -38,6 +36,8 @@ from tests.gpu.test_grug_megatron import (
 from tests.gpu.utils import init_worker_with_type
 
 TOPK = 4
+NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
+NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
 PARAMETER_NAMES = [
     "model.layers.0.self_attn.q_proj.weight",
     "model.layers.3.self_attn.q_proj.weight",
@@ -49,7 +49,7 @@ PARAMETER_NAMES = [
 def _replay_config(tmp_path, *, packing: bool):
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK)
+    write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK)
     cfg = _config(str(model_path), world_size=1, pp=1, ep=1)
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.moe_router_replay = True
