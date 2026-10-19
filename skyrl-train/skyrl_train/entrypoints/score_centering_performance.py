@@ -761,6 +761,8 @@ class PerformanceTrainer(RayPPOTrainer):
                 assert old_choice["message"] == new_choice["message"]
                 assert old_choice[CHOICE_POLICY_STEPS_KEY] == new_choice[CHOICE_POLICY_STEPS_KEY]
                 old_rows, new_rows = old_choice["logprobs"]["content"], new_choice["logprobs"]["content"]
+                assert all(row.get("bytes") is not None for row in old_rows)
+                assert all(row.get("bytes") is None for row in new_rows)
                 assert [row["logprob"] for row in old_rows] == [row["logprob"] for row in new_rows]
                 assert [select_chat_response_topk(row["top_logprobs"], 128) for row in old_rows] == [
                     select_chat_response_topk(row["top_logprobs"], 128) for row in new_rows
@@ -769,7 +771,7 @@ class PerformanceTrainer(RayPPOTrainer):
                 "same_engine": True,
                 "temperatures": [1.0, 0.7],
                 "tokens_message_source_steps_chosen_and_head_scores_exact": True,
-                "sampled_bytes_unused": True,
+                "chosen_display_bytes_suppressed": True,
                 "inference_sampling": self._performance_inference_sampling,
             }
             self.save_probe()
