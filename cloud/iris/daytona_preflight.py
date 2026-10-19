@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pyarrow.parquet as pq
+from harbor_config.models.trial.config import AgentConfig
 from daytona import AsyncDaytona, DaytonaConfig, DaytonaNotFoundError, Resources
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
@@ -32,6 +33,7 @@ from skyrl_train.dataset.harbor_import import (
     lower_harbor_task,
     restore_harbor_trial_task,
 )
+from skyrl_train.dataset.agent_profile import task_agent_config
 from skyrl_train.rollouts.harbor_settings import EnvironmentConfig
 
 SNAPSHOT_TIMEOUT = 600
@@ -114,6 +116,8 @@ def snapshot_requirements(config: DictConfig, root: Path) -> Iterator[SnapshotRe
                     continue
                 directory = root / field / f"package-{index}"
                 restore_harbor_trial_task(lowered.task, directory)
+                agent = OmegaConf.to_container(harbor_config.installed_agent, resolve=True).get("agent", {})
+                task_agent_config(directory, AgentConfig.model_validate(agent))
                 package = TaskConfig.model_validate_toml((directory / "task.toml").read_text())
                 environment = package.environment
                 context = directory / "environment"

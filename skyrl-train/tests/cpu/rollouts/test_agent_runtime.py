@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import json
+import hashlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig
-from rolloutengine.contracts import ModelTurn, RolloutContractError
+from rolloutengine.contracts import ModelTurn
 from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineSpec, PackageSpec
@@ -28,6 +29,7 @@ from skyrl_train.dataset.harbor_import import harbor_trial_task
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
+from skyrl_train.utils.harbor_errors import HarborAgentStartupError
 from tests.cpu.rollouts.engine_fakes import InferenceClient, Tokenizer as ProjectionTokenizer
 from tests.cpu.task_specs import SHELL_ENVIRONMENT, lowered_task, task_input
 
@@ -69,7 +71,10 @@ class UnavailableEnvironment(BaseEnvironment):
 
 
 @pytest.mark.asyncio
-async def test_original_trial_mints_capability_for_container_setup_and_agent_run(tmp_path, monkeypatch, task_inputs):
+@pytest.mark.parametrize("profile_mode", ["absent", "source", "override"])
+async def test_original_trial_mints_capability_for_container_setup_and_agent_run(
+    tmp_path, monkeypatch, task_inputs, profile_mode
+):
     requested = []
 
     class Controller:
@@ -90,6 +95,18 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
     package.mkdir()
     (package / "instruction.md").write_text("Solve the task")
     (package / "task.toml").write_text('[environment]\ndocker_image = "python:3.12"\n')
+    if profile_mode != "absent":
+        prompt = b'agent:\n  instance_template: "Set up {{task}} without source changes."\n'
+        (package / "setup.yaml").write_bytes(prompt)
+        with (package / "task.toml").open("a") as stream:
+            stream.write(
+                '\n[metadata.agent_profile]\nschema_version = 1\nconfig_file = "setup.yaml"\n'
+                f'config_sha256 = "{hashlib.sha256(prompt).hexdigest()}"\n'
+                '[metadata.agent_profile.agent]\nname = "mini-swe-agent"\n'
+                '[metadata.agent_profile.agent.kwargs]\nversion = "2.1.0"\n'
+            )
+    override_prompt = tmp_path / "override.yaml"
+    override_prompt.write_text('agent:\n  instance_template: "Explicit run prompt: {{task}}"\n')
     (package / "tests").mkdir()
     (package / "tests/test.sh").write_text("exit 1\n")
     task = harbor_trial_task(package, source=Source(dataset="fixture", revision="1", row="task", importer_revision="1"))
@@ -106,7 +123,9 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
     settings = InstalledAgentSettings(
         agent=AgentConfig(
             name="mini-swe-agent",
-            kwargs={"version": "2.1.0", "max_turns": 32},
+            kwargs=({} if profile_mode == "source" else {"version": "2.1.0"})
+            | {"max_turns": 32}
+            | ({"config_file": str(override_prompt)} if profile_mode == "override" else {}),
             override_timeout_sec=1800,
             override_setup_timeout_sec=300,
         ),
@@ -134,17 +153,28 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
     await runtime.startup()
     original = runtime.original_session(lowered, "trial", harbor, "train")
     try:
-        with pytest.raises(RolloutContractError, match="exited before requesting"):
+        with pytest.raises(HarborAgentStartupError, match="Harbor agent failed before inference: RuntimeError"):
             await original.prepare()
         results = list((tmp_path / "published").glob("*/trials/*/result.json"))
         result = json.loads(results[0].read_text())
         assert result["exception_info"]["exception_message"] == "container service unavailable"
         assert result["config"]["agent"]["kwargs"]["max_turns"] == 32
+        kwargs = result["config"]["agent"]["kwargs"]
+        if profile_mode == "absent":
+            assert "config_file" not in kwargs
+        elif profile_mode == "source":
+            assert kwargs["config_file"].endswith("/task/setup.yaml")
+            assert (results[0].parents[2] / "task/setup.yaml").read_bytes() == prompt
+        else:
+            assert kwargs["config_file"] == str(override_prompt)
         # The token is minted before container setup, whose allowance is 600 seconds.
         assert requested[0] > 600 + 300 + 1800 + 120
     finally:
-        await original.close()
-        await runtime.shutdown()
+        try:
+            with pytest.raises(HarborAgentStartupError, match="Harbor agent failed before inference: RuntimeError"):
+                await original.close()
+        finally:
+            await runtime.shutdown()
 
 
 class HttpFixtureAgent(BaseInstalledAgent):

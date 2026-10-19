@@ -148,6 +148,32 @@ def test_snapshot_build_failure_prevents_gpu_submission(tmp_path, monkeypatch):
     assert account.snapshots["stage1-approved"].state == SnapshotState.BUILD_FAILED
 
 
+def test_missing_source_prompt_prevents_gpu_submission(tmp_path, monkeypatch):
+    monkeypatch.setenv("DAYTONA_RL_API_KEY", "rl-secret")
+    config = launch_config(tmp_path)
+    package = tmp_path / "package"
+    with (package / "task.toml").open("a") as stream:
+        stream.write(
+            '\n[metadata.agent_profile]\nschema_version = 1\nconfig_file = "missing.yaml"\n'
+            f'config_sha256 = "{"a" * 64}"\n'
+            '[metadata.agent_profile.agent]\nname = "mini-swe-agent"\n'
+        )
+    task = harbor_trial_task(package, source=Source(dataset="stage1", revision="2", row="0", importer_revision="2"))
+    pq.write_table(
+        pa.table({"lowered_task_spec": [lowered_task(task, "harbor_trial").model_dump_json()]}),
+        tmp_path / "tasks.parquet",
+    )
+    config.runtime = {"entrypoint": "skyrl_train.entrypoints.terminal_bench"}
+    monkeypatch.setattr("cloud.iris.iris_backend.build_runtime_bundle", lambda _commit: tmp_path)
+    submitted = []
+    monkeypatch.setattr("cloud.iris.iris_backend.IrisClient", lambda *args, **kwargs: submitted.append(args))
+    with pytest.raises(FileNotFoundError, match="missing.yaml"):
+        launch(
+            SimpleNamespace(config=config, job_name="missing-prompt", entrypoint=config.runtime.entrypoint), "commit"
+        )
+    assert submitted == []
+
+
 @pytest.mark.asyncio
 async def test_missing_shared_snapshot_does_not_build_from_an_arbitrary_alias(tmp_path, monkeypatch):
     config = launch_config(tmp_path)

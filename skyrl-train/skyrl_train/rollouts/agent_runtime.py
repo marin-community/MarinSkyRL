@@ -28,6 +28,7 @@ from taskcompendium.submission import conversation_messages
 
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.io import io
+from skyrl_train.dataset.agent_profile import task_agent_config
 from skyrl_train.dataset.harbor_import import TaskConfig as PackageConfig, restore_harbor_trial_task
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
 from skyrl_train.rollouts.agent_endpoint import registered_agent_endpoint
@@ -167,6 +168,7 @@ class InstalledAgentRuntime:
         try:
             task_dir = evidence / "task"
             restore_harbor_trial_task(lowered.task, task_dir)
+            source_agent = task_agent_config(task_dir, config.agent)
             package = PackageConfig.model_validate_toml((task_dir / "task.toml").read_text())
             context = task_dir / "environment"
             source = (
@@ -194,7 +196,7 @@ class InstalledAgentRuntime:
                 evidence,
                 run_timeout,
                 capability_lifetime=config.trial_attempt_timeout_sec + lowered.session.cleanup_timeout,
-                agent=config.agent,
+                agent=source_agent,
             ) as agent_config:
                 trial_config = TrialConfig.model_validate(
                     {
