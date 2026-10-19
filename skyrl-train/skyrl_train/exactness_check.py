@@ -123,7 +123,8 @@ class ExactnessCheck:
 
     def batch(self, dp_size: int, num_experts: int | None) -> TrainingInputBatch:
         """The pending responses as a policy forward batch, repeated to a multiple of ``dp_size`` rows, with each row's
-        engine data-parallel rank and, when the engines returned them, its expert routes."""
+        response tokens as its loss mask, its engine data-parallel rank and, when the engines returned them, its expert
+        routes."""
         samples = self.pending
         rows = [samples[index % len(samples)] for index in range(-(-len(samples) // dp_size) * dp_size)]
         responses = [row.response_token_ids for row in rows]
@@ -139,6 +140,7 @@ class ExactnessCheck:
             {
                 "sequences": sequences,
                 "attention_mask": attention_mask,
+                "loss_mask": action_mask,
                 ROLLOUT_ENGINE_DP_RANKS_KEY: torch.tensor([row.engine_dp_rank for row in rows], dtype=torch.long),
             },
             routed_expert_rows=(

@@ -1128,7 +1128,9 @@ def _trajectory_rows(prompts, responses, **channels):
     }
 
 
-def test_the_pre_update_policy_forward_receives_each_rows_serving_engine_rank(ray_init, dummy_config, dummy_tokenizer):
+def test_the_pre_update_policy_forward_receives_each_rows_serving_engine_rank_and_loss_mask(
+    ray_init, dummy_config, dummy_tokenizer
+):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
@@ -1148,7 +1150,10 @@ def test_the_pre_update_policy_forward_receives_each_rows_serving_engine_rank(ra
         tis_lcs_alert_threshold=0.0,
     )
 
-    trainer.fwd_logprobs_values_reward(trainer.convert_to_training_input(trajectory_batch, ["a", "b", "c"]))
+    training_input = trainer.convert_to_training_input(trajectory_batch, ["a", "b", "c"])
+    trainer.fwd_logprobs_values_reward(training_input)
 
     [forward] = trainer.policy_model.forward_batches
     assert forward[ROLLOUT_ENGINE_DP_RANKS_KEY].tolist() == [3, 0, UNKNOWN_ENGINE_DP_RANK]
+    # The exact trainer needs the rank of each row with loss tokens.
+    assert torch.equal(forward["loss_mask"], training_input["loss_mask"])

@@ -343,7 +343,7 @@ class MegatronModelWrapper:
         attention_mask = attention_mask.to(bool)
         model_kwargs = {}
         if self.exact:
-            model_kwargs["exact"] = self._exact_forward(attention_mask, rollout_engine_dp_ranks, loss_mask, num_actions)
+            model_kwargs["exact"] = self._exact_forward(rollout_engine_dp_ranks, loss_mask)
         armed = False
         if self.router_replay is not None:
             if rollout_routed_experts is None:
@@ -405,21 +405,17 @@ class MegatronModelWrapper:
         return outputs, packed_seq_params
 
     def _exact_forward(
-        self,
-        attention_mask: torch.Tensor,
-        rollout_engine_dp_ranks: Optional[torch.Tensor],
-        loss_mask: Optional[torch.Tensor],
-        num_actions: Optional[int],
+        self, rollout_engine_dp_ranks: Optional[torch.Tensor], loss_mask: Optional[torch.Tensor]
     ) -> ExactForward:
         """The ``ExactForward`` of one micro-batch, whose rows with loss tokens each need an engine data-parallel
         rank."""
-        if rollout_engine_dp_ranks is None:
-            raise ValueError("exact numerics need each sequence's engine data-parallel rank (rollout_engine_dp_ranks)")
-        ranks = rollout_engine_dp_ranks.to(device=attention_mask.device, dtype=torch.long)
+        if rollout_engine_dp_ranks is None or loss_mask is None:
+            raise ValueError("exact numerics need each sequence's engine data-parallel rank and loss mask")
+        ranks = rollout_engine_dp_ranks.to(device=loss_mask.device, dtype=torch.long)
         # A trajectory that failed before its model call is a row of placeholder tokens, no loss tokens and no
         # engine rank; no loss reads its values.
-        scored = loss_mask.to(ranks.device) != 0 if loss_mask is not None else attention_mask[:, -num_actions:]
-        check_engine_dp_ranks(ranks, scored.any(dim=1), int(self.cfg.generator.inference_engine_data_parallel_size))
+        scored = (loss_mask != 0).any(dim=1)
+        check_engine_dp_ranks(ranks, scored, int(self.cfg.generator.inference_engine_data_parallel_size))
         return ExactForward(ranks, int(self.cfg.generator.inference_engine_expert_parallel_size))
 
     def __call__(self, *args, **kwargs):

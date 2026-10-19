@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM, GrugMoeGatedNorm
+from skyrl_train.trainer import policy_forward_keys
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
 from tests.gpu.utils import get_test_actor_config
@@ -94,6 +95,6 @@ def exact_numerics_config(
 
 def policy_logprobs(policy: PPORayActorGroup, batch: TrainingInputBatch) -> torch.Tensor:
     """The ``[rows, response_length]`` float32 log-probabilities of ``batch``'s responses under ``policy``'s scoring
-    forward, on the CPU."""
-    outputs = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch))
+    forward, sent the fields the trainer's pre-update forward sends, on the CPU."""
+    outputs = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch.select(policy_forward_keys(batch))))
     return concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float().cpu()

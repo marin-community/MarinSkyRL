@@ -330,12 +330,13 @@ def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> floa
 
 def policy_forward_keys(training_input: TrainingInputBatch) -> list[str]:
     """The training batch fields the pre-update policy, reference and critic forwards receive: the tokens, the
-    replayed routes when the batch carries them, and each row's serving engine rank when the batch carries it."""
+    replayed routes when the batch carries them, and each row's serving engine rank, with the loss mask that says
+    which rows need one, when the batch carries ranks."""
     keys = ["sequences", "attention_mask"]
     if training_input.routed_experts is not None:
         keys.append("rollout_routed_experts")
     if training_input.get(ROLLOUT_ENGINE_DP_RANKS_KEY) is not None:
-        keys.append(ROLLOUT_ENGINE_DP_RANKS_KEY)
+        keys += [ROLLOUT_ENGINE_DP_RANKS_KEY, "loss_mask"]
     return keys
 
 
