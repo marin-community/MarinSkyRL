@@ -72,7 +72,7 @@ async def test_compact_chat_preserves_full_vocabulary_probabilities_and_sampling
     assert token_ids == outputs[0].outputs[0].token_ids == [6, 2]
     assert outputs[0].outputs[0].text == "answer"
     assert outputs[0].outputs[0].finish_reason == "stop"
-    assert engine.received == ([1, 2], SamplingParams(temperature, 2, True), "chat-1", {"data_parallel_rank": 3})
+    assert engine.received == ([1, 2], SamplingParams(temperature, 3, True), "chat-1", {"data_parallel_rank": 3})
     assert params == SamplingParams(temperature=temperature)
     assert selected.topk_indices.dtype == np.int32
     assert selected.topk_logprobs.dtype == np.float32

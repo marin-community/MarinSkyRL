@@ -542,7 +542,7 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     )
 
     body = engine.chat_completion.await_args.args[0]["json"]
-    assert body["top_logprobs"] == 2
+    assert body["top_logprobs"] == 3
     assert body["return_tokens_as_token_ids"] is True
     assert engine.chat_completion.await_args.args[0][CHAT_TOPK_WIDTH_KEY] == 2
     np.testing.assert_array_equal(output["student_topk_indices"], [[[2, 3], [10, 11]]])

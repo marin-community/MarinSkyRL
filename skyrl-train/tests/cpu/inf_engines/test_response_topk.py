@@ -6,9 +6,29 @@ import numpy as np
 import pytest
 
 from skyrl_train.inference_engines.response_topk import (
+    select_flat_chat_response_topk,
     select_flat_response_topk,
     select_response_topk,
 )
+
+
+def test_flat_chat_head_matches_display_limit_for_ties_and_outside_sampled_tokens():
+    rows = [[9, 2, 3, 4], [3, 8, 4, 3], [1, 8, 4, 6], [6, 8, 4, 6]]
+    scores = [[-7, -2, -2, -2], [-2, -2, -2, -2], [-2, -2, -2, -2], [-2, -2, -2, -2]]
+    flat = SimpleNamespace(
+        start_indices=[0, 4, 8, 12],
+        end_indices=[4, 8, 12, 16],
+        token_ids=np.asarray(rows).reshape(-1).tolist(),
+        logprobs=np.asarray(scores).reshape(-1).tolist(),
+    )
+    selected = select_flat_chat_response_topk(flat, [row[0] for row in rows], 2)
+    for index, (tokens, values) in enumerate(zip(rows, scores, strict=True)):
+        # The public formatter takes the first K+1 distinct dictionary entries.
+        displayed = list(dict(zip(tokens, values, strict=True)).items())[:3]
+        expected = sorted(displayed, key=lambda item: (-item[1], item[0]))[:2]
+        np.testing.assert_array_equal(selected.topk_indices[index], [token for token, _ in expected])
+        np.testing.assert_array_equal(selected.topk_logprobs[index], [score for _, score in expected])
+        assert selected.sampled_logprobs[index] == values[0]
 
 
 def test_flat_capture_matches_dictionary_reference_with_duplicates_and_ties():

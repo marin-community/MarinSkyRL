@@ -27,18 +27,7 @@ class ResponseTopK(NamedTuple):
     topk_logprobs: np.ndarray
 
 
-def select_flat_response_topk(
-    flat: FlatResponseLogprobs,
-    response_ids: list[int],
-    top_k: int,
-    requested_ids: list[int] | None = None,
-) -> ResponseTopK:
-    """Select chosen-token and top-K full-vocabulary log probabilities.
-
-    Each row contains the sampled token followed by the requested candidates.
-    The sampled token may duplicate a head entry. Preserve the dictionary
-    path's ordering for tied probabilities, including a tied sampled token.
-    """
+def _flat_response_arrays(flat: FlatResponseLogprobs, response_ids: list[int], top_k: int):
     stride = top_k + 1
     starts = np.arange(len(response_ids), dtype=np.int64) * stride
     if (
@@ -55,7 +44,29 @@ def select_flat_response_topk(
         raise ValueError("vLLM flat sampled token IDs do not match the response")
     if np.any(ids < 0) or not np.isfinite(scores).all() or np.any(scores > 0):
         raise ValueError("vLLM flat response requires nonnegative IDs and finite nonpositive logprobs")
-    sampled = scores[:, 0].tolist()
+    return ids, scores
+
+
+def _response_topk_result(ids, scores, head_ids, head_scores):
+    dtype = np.int32 if ids.size == 0 or ids.max() <= np.iinfo(np.int32).max else np.int64
+    return ResponseTopK(
+        scores[:, 0].tolist(), np.ascontiguousarray(head_ids, dtype=dtype), np.ascontiguousarray(head_scores)
+    )
+
+
+def select_flat_response_topk(
+    flat: FlatResponseLogprobs,
+    response_ids: list[int],
+    top_k: int,
+    requested_ids: list[int] | None = None,
+) -> ResponseTopK:
+    """Select chosen-token and top-K full-vocabulary log probabilities.
+
+    Each row contains the sampled token followed by the requested candidates.
+    The sampled token may duplicate a head entry. Preserve the dictionary
+    path's ordering for tied probabilities, including a tied sampled token.
+    """
+    ids, scores = _flat_response_arrays(flat, response_ids, top_k)
     if requested_ids is not None:
         if len(requested_ids) != top_k or not np.all(ids[:, 1:] == np.asarray(requested_ids)):
             raise ValueError("vLLM flat response omitted requested token IDs or changed their order")
@@ -67,8 +78,25 @@ def select_flat_response_topk(
         order = np.lexsort((ids, -order_scores), axis=-1)[:, :top_k]
         head_ids = np.take_along_axis(ids, order, axis=1)
         head_scores = np.take_along_axis(scores, order, axis=1)
-    dtype = np.int32 if ids.size == 0 or ids.max() <= np.iinfo(np.int32).max else np.int64
-    return ResponseTopK(sampled, np.ascontiguousarray(head_ids, dtype=dtype), np.ascontiguousarray(head_scores))
+    return _response_topk_result(ids, scores, head_ids, head_scores)
+
+
+def select_flat_chat_response_topk(flat: FlatResponseLogprobs, response_ids: list[int], top_k: int) -> ResponseTopK:
+    """Preserve the native chat head, including tied boundary candidates.
+
+    Chat collects K+1 natural candidates and emits at most K+1 distinct
+    entries, including the sampled token. When that token is outside the
+    head, the final natural candidate occupies the hidden display slot.
+    """
+    ids, scores = _flat_response_arrays(flat, response_ids, top_k + 1)
+    duplicate = np.any(ids[:, :1] == ids[:, 1:], axis=1)
+    order_scores = scores.copy()
+    order_scores[:, 0] = np.where(duplicate, -np.inf, scores[:, 0])
+    order_scores[:, -1] = np.where(duplicate, scores[:, -1], -np.inf)
+    order = np.lexsort((ids, -order_scores), axis=-1)[:, :top_k]
+    return _response_topk_result(
+        ids, scores, np.take_along_axis(ids, order, axis=1), np.take_along_axis(scores, order, axis=1)
+    )
 
 
 def select_response_topk(logprobs: Mapping[int, float], top_k: int) -> tuple[list[int], list[float]]:
