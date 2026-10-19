@@ -82,6 +82,7 @@ def test_chat_candidates_use_exact_token_ids_and_discard_extra_sampled_token(can
     assert scores == [-0.1, -0.2]
 
 
-def test_chat_candidates_reject_decoded_strings():
+@pytest.mark.parametrize("token", ["hello", "token_id:٣"])
+def test_chat_candidates_reject_decoded_strings(token):
     with pytest.raises(ValueError, match="exact token IDs"):
-        select_chat_response_topk([{"token": "hello", "logprob": -0.1}], 1)
+        select_chat_response_topk([{"token": token, "logprob": -0.1}], 1)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping
 from typing import Any, NamedTuple, Protocol
 
@@ -90,10 +89,10 @@ def select_chat_response_topk(items: list[dict[str, Any]], top_k: int) -> tuple[
     scores = {}
     for item in items:
         token = item.get("token")
-        match = re.fullmatch(r"token_id:([0-9]+)", token) if isinstance(token, str) else None
-        if match is None:
+        suffix = token[9:] if isinstance(token, str) and token.startswith("token_id:") else ""
+        if not suffix or not suffix.isascii() or not suffix.isdecimal():
             raise ValueError("chat response top-K omitted exact token IDs")
-        token_id = int(match.group(1))
+        token_id = int(suffix)
         if token_id in scores:
             raise ValueError("chat response top-K repeated a token ID")
         scores[token_id] = item.get("logprob")
