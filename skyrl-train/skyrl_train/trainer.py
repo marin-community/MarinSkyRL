@@ -1559,6 +1559,9 @@ class RayPPOTrainer:
         assert trainer.rollout_buffer.max_staleness_steps == 0
         assert not trainer.offload_optimizer_during_rollouts and self.distillation_plan is None
         megatron = trainer.policy.megatron_config
+        assert megatron.transformer_config_kwargs.get("disable_parameter_transpose_cache", False), (
+            "Streaming requires TE to accumulate into main_grad on every scheduler call"
+        )
         assert not megatron.ddp_config.overlap_grad_reduce and megatron.ddp_config.average_in_collective
         assert not megatron.moe_router_replay and trainer.policy.grug_query_bias_update_mode == "frozen"
         dp = (
