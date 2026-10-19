@@ -198,14 +198,17 @@ The first physical verifier-GRPO attempt used the disjoint eight-task
 sampled-token logprobs and a 512-token per-turn cap. Iris job
 `/zack/pi-beta-verifier-grpo-gb200-20261019-o` (`grpo-attempt-22`) failed
 before the first optimizer step: one trial returned corrupted numbered
-in-memory evidence (invalid base64) and another failed at grading with
-`ValidationError`. The shared worker refused to substitute missing trial
-evidence, so **no physical GRPO group or update has been validated**. Do not
-retry the GPU job unchanged. One disposable Daytona/Qwen3-tokenizer probe
+in-memory evidence (invalid base64), while other trials failed to receive a
+score because separate verification timed out (`VerifierTimeoutError` /
+`VerificationNotCompletedError`). A `ValidationError` appeared in the
+subsequent cleanup trace for the corrupted-frame trial; it is **not** evidence
+that a separate grader rejected an artifact. The shared worker refused to
+substitute missing trial evidence, so **no complete physical GRPO group or
+update has been validated**. Do not retry the GPU job unchanged. One disposable Daytona/Qwen3-tokenizer probe
 completed a scripted 361-token student response with 361 sampled logprobs;
 this does not reproduce the intermittent corrupt frame. A six-trial follow-up
 failed during the Pi/NVM setup before any student trial ran. Reproduce the
-stdout transport and verifier artifact failures in disposable CPU sandboxes
+stdout transport and separate-verifier timeouts in disposable CPU sandboxes
 first, without retaining raw Pi stdout or treating diagnostic logs as
 trajectory evidence.
 
@@ -215,8 +218,8 @@ Next smoke gates, in order:
    step-0 baseline, with separate per-task records; both scored 0/8 under the
    256-token cap. Repeat with a meaningful answer budget and tasks that produce
    valid, non-degenerate outcomes before drawing learning conclusions.
-2. Fix the diagnosed in-memory stdout transport and separate-grader artifact
-   failures locally, then run a physical verifier-GRPO **baseline** group with
+2. Diagnose the in-memory stdout transport and separate-verifier timeouts
+   locally, then run a physical verifier-GRPO **baseline** group with
    two independently sampled Pi trials per prompt, exact per-turn sampled
    logprobs, task-verifier grades, nonzero group advantage and a checkpointed
    GPU update. Never copy one trial to manufacture a group member.
