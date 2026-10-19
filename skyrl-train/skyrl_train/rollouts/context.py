@@ -225,11 +225,30 @@ class TrainingContext:
         await asyncio.gather(*tasks, return_exceptions=True)
         ray.kill(self._buffer)
 
-    async def pause_and_drain(self) -> None:
-        """Stop dispatching new generation and finish already submitted groups."""
+    def pause(self) -> None:
         self._submission_allowed.clear()
-        if self._running:
-            await self._until_failure(asyncio.gather(*self._running))
+
+    async def pause_and_drain(self, timeout: float) -> int:
+        """Pause submissions and return the number of groups discarded at the deadline."""
+        self.pause()
+        if not self._running:
+            return 0
+        _, pending = await self._until_failure(asyncio.wait(tuple(self._running), timeout=timeout))
+        if not pending:
+            return 0
+        in_flight = dict(self._in_flight)
+        cancelled = await self._until_failure(self._buffer.cancel_leases.remote(list(in_flight)))
+        async with self._uids_released:
+            self._live_uids -= collections.Counter(in_flight[lease_id].prompt["uid"] for lease_id in cancelled)
+            self._uids_released.notify_all()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        assert self._failure is not None
+        if self._failure.done():
+            self._failure.result()
+        logger.info("Evaluation drain deadline: discarded {} unfinished training groups", len(cancelled))
+        return len(cancelled)
 
     def resume(self) -> None:
         self._submission_allowed.set()
@@ -434,7 +453,11 @@ class TrainingContext:
         """Await ``awaitable`` unless a rollout task fails first, then raise that failure."""
         assert self._failure is not None, "start the training context before reading from it"
         work: asyncio.Future[Any] = asyncio.ensure_future(awaitable)
-        await asyncio.wait({work, self._failure}, return_when=asyncio.FIRST_COMPLETED)
+        try:
+            await asyncio.wait({work, self._failure}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            work.cancel()
+            raise
         if work.done():
             return work.result()
         work.cancel()

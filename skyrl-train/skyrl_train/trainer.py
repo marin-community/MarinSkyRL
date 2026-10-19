@@ -1609,17 +1609,27 @@ class RayPPOTrainer:
 
     @asynccontextmanager
     async def _evaluation_session(self):
+        self.context.pause()
         try:
-            with Timer("eval_drain", self.all_timings if self.global_step else None):
-                await self.context.pause_and_drain()
-            async with evaluation_session(
-                self.eval_trajectory_runner, self.cfg, self.global_step, self.eval_trajectory_sink
-            ) as pool:
-                if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
+            async with asyncio.TaskGroup() as tasks:
+                drain = tasks.create_task(self._drain_for_evaluation())
+                needs_sync = (
+                    self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step
+                )
+                if needs_sync:
+                    await drain
                     await self._sync_policy_for_rollouts(reason="evaluation")
-                yield pool
+                async with evaluation_session(
+                    self.eval_trajectory_runner, self.cfg, self.global_step, self.eval_trajectory_sink
+                ) as pool:
+                    yield pool
+            self._eval_drain_discarded_groups = drain.result()
         finally:
             self.context.resume()
+
+    async def _drain_for_evaluation(self) -> int:
+        with Timer("eval_drain", self.all_timings if self.global_step else None):
+            return await self.context.pause_and_drain(self.cfg.trainer.eval_drain_timeout_seconds)
 
     async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
         async with self._evaluation_session() as pool:
@@ -1632,6 +1642,7 @@ class RayPPOTrainer:
             eval_metrics = native.result()
             for task in additional:
                 eval_metrics.update(task.result())
+        eval_metrics["eval/drain_discarded_groups"] = self._eval_drain_discarded_groups
         self._control = await self.callback_handler.call_event_async(
             "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
         )

@@ -401,10 +401,11 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             await operation
         assert writer.groups == []
         assert attempts == 1
+        # Cancellation fences inference first; shutdown joins retained cleanup.
+        await worker.shutdown()
         for machine in machines:
             with pytest.raises(RuntimeError, match="closed"):
                 await machine.run(Command(("true",)))
-        await worker.shutdown()
         return
     await operation
     assert waits == [1, 1.5]

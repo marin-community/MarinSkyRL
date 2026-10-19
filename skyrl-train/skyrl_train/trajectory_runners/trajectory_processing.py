@@ -411,7 +411,7 @@ def concatenate_trajectory_batches(
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
     _concatenate_environment_metrics(result, trajectory_batches)
-    for key in ("verification_results", "evidence_messages"):
+    for key in ("verification_results", "evidence_messages", "token_trace_available"):
         if any(batch.get(key) is not None for batch in trajectory_batches):
             result[key] = [
                 value
@@ -538,6 +538,7 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         "env_classes",
         "verification_results",
         "evidence_messages",
+        "token_trace_available",
     ):
         value = trajectory_batch.get(key)
         if isinstance(value, list):

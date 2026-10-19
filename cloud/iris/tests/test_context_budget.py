@@ -61,6 +61,7 @@ def test_context_budget_derives_all_hydra_length_arguments():
     assert cfg.trainer.max_prompt_length == 114688
     assert cfg.generator.max_input_length == 114688
     assert cfg.generator.max_turns == 90
+    assert cfg.environment.task_sessions.overrides.max_turns == 90
     assert cfg.generator.sampling_params.max_generate_length == 16384
     assert cfg.generator.engine_init_kwargs.max_model_len == 131072
     assert cfg.terminal_bench_config.harbor.max_turns == 90

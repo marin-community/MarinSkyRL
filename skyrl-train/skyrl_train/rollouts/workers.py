@@ -71,6 +71,7 @@ class RolloutWorkerResources:
     executor_threads: int
     progress_timeout_seconds: float
     start_interval_seconds: float
+    cancellation_timeout_seconds: float
 
     @classmethod
     def from_config(cls, config: DictConfig) -> RolloutWorkerResources:
@@ -81,6 +82,7 @@ class RolloutWorkerResources:
             executor_threads=int(workers.executor_threads),
             progress_timeout_seconds=float(workers.progress_timeout_seconds),
             start_interval_seconds=float(workers.start_interval_seconds),
+            cancellation_timeout_seconds=float(workers.cancellation_timeout_seconds),
         )
 
 
@@ -141,7 +143,7 @@ class RolloutWorkerPool:
     """Rollout worker actors that the trainer uses as its trajectory runner.
 
     Each training task or ``run`` request goes whole to the least-loaded worker; training tasks write their groups
-    straight to the rollout buffer. Evaluation drains training requests and uses the same entire pool;
+    straight to the rollout buffer. Evaluation overlaps draining requests and uses the same entire pool;
     new training submissions wait until evaluation finishes. A request fails with
     ``RolloutWorkerStalledError`` when its worker completes nothing for the progress timeout.
 
@@ -220,7 +222,7 @@ class RolloutWorkerPool:
         eval_step: int,
         val_set_name: str | None = None,
     ) -> None:
-        """Give evaluation priority, drain every worker, and begin one frozen session."""
+        """Block new training submissions and admit evaluation alongside existing requests."""
         async with self._routing:
             if self._eval_session_active:
                 raise RuntimeError("an eval session is already active")
@@ -230,8 +232,6 @@ class RolloutWorkerPool:
                 "Evaluation session requested: run={} step={} workers={}", run_name, eval_step, len(self._actors)
             )
         try:
-            async with self._routing:
-                await self._routing.wait_for(lambda: not any(self._pending))
 
             async def start(actor):
                 await actor.start_eval_session.remote(run_name=run_name, eval_step=eval_step, val_set_name=val_set_name)
@@ -326,6 +326,13 @@ class RolloutWorkerPool:
                 return output
         except asyncio.CancelledError:
             ray.cancel(request, force=False, recursive=True)
+            # Local cancellation alone does not mean the remote runner stopped using
+            # inference. Acknowledge its cleanup before a caller switches weights.
+            try:
+                async with asyncio.timeout(self._resources.cancellation_timeout_seconds):
+                    await asyncio.shield(result)
+            except ray.exceptions.TaskCancelledError:
+                pass
             raise
         finally:
             # An abandoned request's result would otherwise surface later as an unretrieved error.

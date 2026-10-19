@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Protocol
 
 from hydra import compose, initialize_config_dir
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from skyrl_train.config.objective_spec import validate_objective
 from skyrl_train.config.ftpo import FTPOConfig
@@ -221,6 +221,9 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
     client input limit therefore reserves the complete per-turn output allowance.
     """
     _validate_no_derived_context_fields(raw, config_path)
+    for section in ("session", "overrides"):
+        if "max_turns" in raw.get("environment", {}).get("task_sessions", {}).get(section, {}):
+            raise ValueError(f"{config_path}: set max_turns only in context_budget, not task session {section}")
     config = raw.get("context_budget")
     if not isinstance(config, dict):
         raise ValueError(f"{config_path}: context_budget must be a mapping")
@@ -596,7 +599,17 @@ def parse_rl_config(
         trainer=trainer,
         generator=generator,
         data=data,
-        environment=environment,
+        environment={
+            **environment,
+            "task_sessions": {
+                **environment.get("task_sessions", {}),
+                "overrides": {
+                    **environment.get("task_sessions", {}).get("session", {}),
+                    **environment.get("task_sessions", {}).get("overrides", {}),
+                    "max_turns": context_budget.max_turns,
+                },
+            },
+        },
         trajectory_runner=trajectory_runner,
         terminal_bench=terminal_bench,
         tensor_parallel_size=tensor_parallel_size,
@@ -842,7 +855,9 @@ def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix:
         if isinstance(value, Mapping) and not value:
             continue
         path = f"{prefix}.{key}" if prefix else key
-        current = OmegaConf.select(config, path, default=...)
+        # Mapping keys can contain dots (for example registry hostnames).
+        # Keep diagnostic paths separate from literal mapping access.
+        current = config.get(key, ...)
         key_exists = current is not ...
         if isinstance(value, Mapping):
             if not isinstance(current, DictConfig):
@@ -850,12 +865,14 @@ def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix:
                     raise ValueError(f"SkyRL config key {path!r} is not a mapping in ppo_base_config")
                 if not key_exists and not _path_allows_new_keys(path):
                     raise ValueError(f"SkyRL config contains unknown key {path!r}")
-                OmegaConf.update(config, path, {}, merge=False, force_add=_path_allows_new_keys(path))
-            _merge_config_mapping(config, value, path)
+                with open_dict(config):
+                    config[key] = {}
+            _merge_config_mapping(config[key], value, path)
             continue
         if not key_exists and not _path_allows_new_keys(path):
             raise ValueError(f"SkyRL config contains unknown key {path!r}")
-        OmegaConf.update(config, path, copy.deepcopy(value), merge=False, force_add=_path_allows_new_keys(path))
+        with open_dict(config):
+            config[key] = copy.deepcopy(value)
 
 
 def _compose_config_groups(config_groups: Mapping[str, str], *, config_name: str | None) -> DictConfig:

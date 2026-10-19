@@ -182,6 +182,73 @@ class DeletionMachine:
 
 
 @pytest.mark.asyncio
+async def test_discarded_group_stops_inference_before_slow_cleanup_and_worker_remains_usable(task_inputs):
+    config, request = task_inputs
+    task = request.rows[0].lowered.task.model_copy(update={"environment_requirements": SHELL_ENVIRONMENT})
+    request = replace(request, rows=(task_input(lowered_task(task, backend="fixture")),))
+    started = asyncio.Event()
+    inference_stopped = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    deleted = asyncio.Event()
+    deletions = []
+
+    class Client(InferenceClient):
+        async def generate(self, request):
+            if started.is_set():
+                return await super().generate(request)
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                inference_stopped.set()
+
+    class SlowDeletionMachine(DeletionMachine):
+        async def close(self):
+            cleanup_started.set()
+            await release_cleanup.wait()
+            await super().close()
+
+    class Factory:
+        backend = Backend.SHELLSIM
+
+        def check_environment(self, _requirements, _spec):
+            pass
+
+        async def create(self, spec):
+            machine = await ShellSimMachineFactory().create(spec)
+            return SlowDeletionMachine(machine, deletions, deleted)
+
+    worker = TaskRolloutWorker(
+        config, WholeTaskProjection(config, Tokenizer()), Client(), {"fixture": Factory()}, shutdown_timeout=10
+    )
+    writer = Writer()
+    operation = asyncio.create_task(
+        worker.run_task(RolloutTask(RolloutLease("discarded", 0, 1), {"uid": task.id}, request), writer)
+    )
+    try:
+        async with asyncio.timeout(5):
+            await started.wait()
+            operation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await operation
+            await cleanup_started.wait()
+            assert inference_stopped.is_set()
+            assert not deleted.is_set()
+            assert writer.groups == []
+            release_cleanup.set()
+            await deleted.wait()
+            await worker.run_task(RolloutTask(RolloutLease("next", 0, 1), {"uid": task.id}, request), writer)
+            assert len(writer.groups) == 1
+            assert writer.groups[0][1].trajectory_batch["rewards"] == [1.0]
+    finally:
+        release_cleanup.set()
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        await worker.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_worker_shutdown_cancels_model_and_deletes_its_machine(task_inputs):
     config, request = task_inputs
     lowered = request.rows[0].lowered

@@ -252,7 +252,7 @@ async def test_evaluation_pause_drains_generation_and_preserves_next_training_ba
 
         async def drain():
             pause_started.set()
-            await context.pause_and_drain()
+            await context.pause_and_drain(STALL_TIMEOUT)
 
         draining = asyncio.create_task(drain())
         await pause_started.wait()
@@ -265,6 +265,28 @@ async def test_evaluation_pause_drains_generation_and_preserves_next_training_ba
         assert workers.started == ["a"]
         context.resume()
         assert await _next_uids(context) == ["b"]
+    finally:
+        await context.close()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_drain_discards_straggler_preserves_completed_group_and_resumes(ray_module, start_buffer):
+    workers = _Workers(blocked=frozenset({"a"}))
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=2, max_in_flight=2, max_staleness_steps=0)
+    context.start()
+    try:
+        await context.publish(1)
+        await workers.started_events["a"].wait()
+        await workers.written["b"].wait()
+        assert await context.pause_and_drain(0) == 1
+        snapshot = await context.state_dict()
+        assert [group.verdict.uid for group in snapshot.ready] == ["b"]
+        assert not snapshot.loader.retries
+        context.resume()
+        assert set(await _next_uids(context)) == {"b", "c"}
+        await context.publish(2)
+        workers.unblocked["a"].set()
+        assert len(await _next_uids(context)) == 2
     finally:
         await context.close()
 

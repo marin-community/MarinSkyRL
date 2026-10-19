@@ -1,27 +1,35 @@
 from dataclasses import replace
+import json
 
 import numpy as np
 import pytest
 from omegaconf import OmegaConf
 from rolloutengine.contracts import (
+    GenerationLimitReached,
     ModelTurn,
     RolloutContractError,
     RolloutData,
     RolloutFailure,
     RolloutStep,
+    SessionStart,
     Transition,
 )
+from rolloutengine.engine import RolloutEngine
 from taskcompendium.grading_result import GradeResult, Outcome
 
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.types import TrajectoryID, TaskRequestBatch
+from skyrl_train.utils.trainer_utils import dump_per_dataset_eval_results
 from tests.cpu.task_specs import lowered_task, task_input, text_task
 
 
 class Tokenizer:
     eos_token_id = 99
+
+    def decode(self, tokens):
+        return "!" if tokens == [0] else str(tokens)
 
 
 def config():
@@ -104,6 +112,71 @@ def test_whole_projection_preserves_tokens_rewards_and_tool_masks():
     assert batch["loss_masks"] == [[1, 0, 1]]
     np.testing.assert_allclose(batch["rollout_logprobs"][0], [-0.1, 0.0, -0.1])
     assert "trajectory_ids" not in batch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("score", [1.0, 0.0, None])
+async def test_eval_export_preserves_evidence_after_history_reset_and_length_stop(tmp_path, score):
+    messages = (
+        {"role": "user", "content": "Inspect the source."},
+        {"role": "assistant", "content": "The fix is applied."},
+        {"role": "tool", "content": "Regression test passed."},
+    )
+    trial_uri = "s3://evidence/attempt/trials/attempt"
+
+    class ResetSession:
+        async def prepare(self):
+            return SessionStart(messages[:1], {})
+
+        async def advance(self, turn):
+            return Transition(done=False, reset_conversation=messages)
+
+        async def grade(self, messages, *, stop_reason, outputs):
+            return GradeResult(
+                Outcome.INFRA_ERROR if score is None else Outcome.GRADED,
+                score,
+                error="Missing reward" if score is None else None,
+                diagnostics={"harbor_trial_uri": trial_uri, "api_key": "must-not-export"},
+            )
+
+        async def close(self):
+            pass
+
+    async def model(model_request):
+        if len(model_request.messages) > 1:
+            raise GenerationLimitReached((8, 9))
+        return ModelTurn(messages[1], (1, 2), (3,), (-0.1,), "stop")
+
+    task = lowered_task(text_task(), "reset", max_turns=3)
+    record = await RolloutEngine(model, {}, sessions={"reset": lambda context: ResetSession()}).run(task)
+    batch = WholeTaskProjection(config(), Tokenizer()).project([record], request())
+    assert batch["response_ids"] == [[0]]
+    assert batch["loss_masks"] == [[0]]
+    assert batch["token_trace_available"] == [False]
+
+    # Preserve row identity through the same concatenate/filter boundaries used by evaluation.
+    legacy = {
+        "prompt_token_ids": [[0]],
+        "response_ids": [[0]],
+        "rewards": [0.0],
+        "loss_masks": [[1]],
+        "stop_reasons": ["stop"],
+    }
+    joined = concatenate_trajectory_batches([legacy, batch], tis_lcs_alert_threshold=0.005)
+    selected = filter_trajectory_batch(joined, [1, 0])
+    dump_per_dataset_eval_results(
+        str(tmp_path), Tokenizer(), selected, ["fixture"] * 2, ["harbor_trial"] * 2, {}, ["trial", "legacy"]
+    )
+    saved, legacy_saved = [json.loads(line) for line in (tmp_path / "fixture.jsonl").read_text().splitlines()]
+    assert saved["evidence_messages"] == list(messages)
+    assert saved["token_trace_available"] is False
+    assert saved["input_prompt"] is None
+    assert saved["output_response"] is None
+    assert saved["harbor_trial_uri"] == trial_uri
+    assert saved["verification"]["score"] == score
+    assert "api_key" not in saved["verification"]["diagnostics"]
+    assert legacy_saved["token_trace_available"] is None
+    assert legacy_saved["output_response"] == "!"
 
 
 def test_projection_retains_the_verifier_reason_when_harbor_classifies_it_as_a_failure():

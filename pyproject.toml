@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@b3206ac1c46cee3079441f394b5a6a13bb923d0e#subdirectory=lib/verifyit",
+    "marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@f45f04b293128bd8a5b1567e03bef59c7f59e1d0#subdirectory=lib/verifyit",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -35,8 +35,8 @@ dependencies = [
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@b3206ac1c46cee3079441f394b5a6a13bb923d0e#subdirectory=lib/rolloutengine",
-    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@b3206ac1c46cee3079441f394b5a6a13bb923d0e#subdirectory=lib/shellbox",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@f45f04b293128bd8a5b1567e03bef59c7f59e1d0#subdirectory=lib/rolloutengine",
+    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@f45f04b293128bd8a5b1567e03bef59c7f59e1d0#subdirectory=lib/shellbox",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -53,7 +53,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@b3206ac1c46cee3079441f394b5a6a13bb923d0e#subdirectory=lib/taskcompendium",
+    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@f45f04b293128bd8a5b1567e03bef59c7f59e1d0#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -216,7 +216,7 @@ flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor = { git = "https://github.com/marin-community/harbor.git", rev = "69a4ad674a2d101146db7fbbfce0f7149c6abc9e" }
+harbor = { git = "https://github.com/marin-community/harbor.git", rev = "a85964704593b7d89428ef480238ffce8be3a63c" }
 hs-connectors = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8", subdirectory = "hs_connectors" }
 speculators = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8" }
 torch = [

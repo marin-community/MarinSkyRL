@@ -54,6 +54,28 @@ selected architecture. Validate frozen-profile installation, two-node H100 Ray a
 checkpoint export with the selected image before publishing the digest; GPU dependency versions
 come from `uv.lock`.
 
+### Daytona launch checks and task overrides
+
+For Daytona runs, the Iris launcher prepares the snapshots required by train and validation tasks
+before it submits the GPU job. It reuses the Shellbox snapshot builder, waits until required snapshots are active,
+and aborts submission on a build, credential, quota, or readiness failure. Harbor validation uses
+`eval_daytona_api_key_env` when configured. Launch preparation for Docker-only runs does not contact Daytona.
+
+The RL snapshot check purges all org-owned snapshots whose recorded last use is more than one hour
+old. It rechecks identity and last use before deletion and waits for deletion to finish. Snapshots
+with no recorded last use and provider-owned snapshots are left unchanged. Cleanup runs only through
+`DAYTONA_RL_API_KEY`; validation credentials do not trigger cleanup. Keep train and eval orgs separate.
+For original Harbor trials, `installed_agent.environment_snapshots` maps image identities to names.
+If several source images share a missing snapshot, the launcher fails: that mapping does not identify
+which shared base image was used. Rebuilding from one task's image would replace that shared base.
+
+The launch recipe's `context_budget.max_turns` overrides stored task turn limits. It is the only
+supported turn-limit setting in source recipes; declaring it again in session overrides fails validation.
+Explicit `environment.task_sessions.session` fields override the corresponding `TaskSessionSpec` fields.
+`environment.task_sessions.overrides` can supply additional overrides and takes precedence over `session`,
+including on pre-lowered tasks. These settings are saved in the resolved launch config. Task fields
+that have no explicit run override remain unchanged; the stored dataset is not rewritten.
+
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
 - GRPO with the data [open-thoughts/OpenThoughts-Agent-v1-RL](https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-RL), while

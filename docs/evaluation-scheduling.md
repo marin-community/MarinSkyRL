@@ -1,9 +1,22 @@
 # Evaluation scheduling
 
 An evaluation sweep pauses the training producer and drains its submitted generation
-requests. It then reserves every rollout worker and synchronizes the policy weights.
-The optimizer cannot advance until the sweep returns. Queued training groups remain
-in the training buffer; draining does not consume them or perform optimizer updates.
+requests for up to `trainer.eval_drain_timeout_seconds` (300 seconds by default).
+At the deadline it revokes unfinished groups and cancels their remote requests.
+Groups committed before revocation remain available for training; late writes from revoked groups are
+ignored. Cancellation cleanup has a separate per-request limit,
+`trajectory_runner.rollout_workers.cancellation_timeout_seconds` (120 seconds by
+default), with all cancellations issued concurrently. Cleanup failure fails the run.
+Discarding unfinished groups can bias retained training data toward faster tasks; monitor
+`eval/drain_discarded_groups`, the number of revoked groups in each sweep.
+
+When inference already has the evaluated policy version, evaluation requests can be
+submitted while training requests drain. Execution still shares the configured worker
+capacity with those training requests. The ordinary training
+step synchronizes weights before its evaluation callback, so it uses this overlap.
+If evaluation needs a different policy version, it first awaits the bounded drain
+and synchronizes weights. The optimizer cannot advance until both evaluation and
+drain finish. Draining does not consume completed groups or perform optimizer updates.
 Training submissions resume when the evaluation session exits, including on errors.
 
 Native validation rows, named sampling profiles, and inline Harbor trials enter one
@@ -33,6 +46,12 @@ coverage determines checkpoint-selection eligibility. Native batches never enter
 training buffer. Harbor configurations require unique pinned tasks, one agent, and
 one attempt per task. Retries remain explicitly configured Harbor infrastructure
 retries. The full sweep, including all cohorts, uses one policy version.
+
+Inline Harbor scoring retains verifier rewards after agent-attributable stops and
+partial-work terminations, as classified by Harbor's pinned error taxonomy.
+Infrastructure and unknown errors remain unscored, even if a reward is present.
+Results without a verifier reward remain unscored for every category. Scoring uses
+the verifier reward without the training loss's error-treatment overrides.
 
 Callbacks that add evaluation sources implement `collect_evaluation(state, trainer,
 pool)` and admit each unit of work with `pool.run(source, run, limit=...)`. They return

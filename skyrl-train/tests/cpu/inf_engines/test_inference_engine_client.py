@@ -78,6 +78,9 @@ def test_rendezvous_port_avoids_ephemeral_range_and_existing_listener(monkeypatc
 
     assert _RENDEZVOUS_PORT_START <= second < _RENDEZVOUS_PORT_STOP
     assert second == first + 1
+    # CoreWeave uses 10240–65535 for outbound ephemeral sockets, rather
+    # than Linux's default 32768–60999. The handoff must stay below both.
+    assert second < 10240
 
 
 def test_rendezvous_port_fails_when_range_is_excluded():

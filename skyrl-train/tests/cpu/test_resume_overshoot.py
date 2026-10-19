@@ -68,6 +68,7 @@ def _make_bare_trainer(global_step: int, total_training_steps: int, colocate_all
     trainer.context.state_dict = AsyncMock(name="state_dict")
     lifecycle = EvaluationLifecycle()
     trainer.context.pause_and_drain = lifecycle.pause_and_drain
+    trainer.context.pause = lifecycle.pause
     trainer.context.resume = lifecycle.resume
     trainer.eval_trajectory_runner = lifecycle
     trainer.eval_trajectory_sink = None
@@ -165,7 +166,7 @@ def test_train_end_runs_and_logs_the_requested_evaluation(
     assert [(row.step, row.values["eval/accuracy"]) for row in payloads if row.kind == "eval"] == expected_evaluations
     assert [row.values for row in payloads if row.kind == "train"] == [{"reward/raw_reward": 0.625}]
     assert tracked == [
-        ({"eval/accuracy": score}, {"step": step, "commit": commit})
+        ({"eval/accuracy": score, "eval/drain_discarded_groups": 0}, {"step": step, "commit": commit})
         for (step, score), commit in zip(expected_evaluations, expected_commits, strict=True)
     ]
     evaluation_values = delivered_telemetry.select("training_metric_value", payload_kind="eval", metric="eval/accuracy")
@@ -184,12 +185,39 @@ def test_train_end_still_saves_when_the_final_evaluation_fails():
 
     with pytest.raises(ExceptionGroup) as failure:
         asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
-    assert isinstance(failure.value.exceptions[0], RuntimeError)
-    assert str(failure.value.exceptions[0]) == "evaluation failed"
-    assert trainer.eval_trajectory_runner.events == ["drained", "started", "stopped", "resumed"]
+    assert failure.value.subgroup(RuntimeError) is not None
+    events = trainer.eval_trajectory_runner.events
+    assert events.index("started") < events.index("stopped") < events.index("resumed")
+    assert events.index("drained") < events.index("resumed")
 
     trainer._snapshot_checkpoint.assert_called_once()
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
+
+
+@pytest.mark.asyncio
+async def test_evaluation_makes_progress_before_training_drain_finishes():
+    trainer = _make_bare_trainer(global_step=2, total_training_steps=16)
+    trainer._inference_engines_configured = lambda: True
+    trainer._inference_policy_step = 2
+    trainer._policy_version_step = 2
+    trainer.callback_handler = CallbackHandler([])
+    eval_started = asyncio.Event()
+    metrics = []
+    trainer.tracker = SimpleNamespace(log=lambda values, **kwargs: metrics.append(values))
+
+    async def drain(timeout):
+        await eval_started.wait()
+        return 3
+
+    async def evaluate(**kwargs):
+        eval_started.set()
+        return {"eval/accuracy": 0.75}
+
+    trainer.context.pause_and_drain = drain
+    trainer.eval = evaluate
+    async with asyncio.timeout(5):
+        await trainer._evaluate_and_log(trainer._create_trainer_state(epoch=0), commit=True)
+    assert metrics == [{"eval/accuracy": 0.75, "eval/drain_discarded_groups": 3}]
 
 
 @pytest.mark.parametrize(

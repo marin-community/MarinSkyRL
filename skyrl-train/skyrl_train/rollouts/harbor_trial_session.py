@@ -15,6 +15,7 @@ from taskcompendium.grading_result import GradeResult, GradingFailure, Outcome
 from skyrl_train.rollouts.agent_backend import AgentGenerationStopped, AgentInferenceBackend
 from skyrl_train.rollouts.agent_trace import recorded_completion
 from skyrl_train.rollouts.harbor_settings import HARBOR_EXCEPTION
+from skyrl_train.utils.harbor_errors import HarborAgentStartupError
 
 
 def trial_grade(result: TrialResult, reward_key: str) -> GradeResult:
@@ -71,8 +72,11 @@ class HarborTrialSession(AgentTaskSession):
 
         async def run(complete: AgentCompletion) -> None:
             nonlocal result
+            requested_completion = False
 
             async def bounded_complete(request: SessionStart) -> ModelTurn:
+                nonlocal requested_completion
+                requested_completion = True
                 if generation_stopped.is_set():
                     raise AgentGenerationStopped(generation_stop_reason)
                 response = asyncio.create_task(complete(request))
@@ -88,6 +92,11 @@ class HarborTrialSession(AgentTaskSession):
                     await asyncio.gather(response, stopped, return_exceptions=True)
 
             result = await run_trial(bounded_complete)
+            if not requested_completion:
+                raise HarborAgentStartupError(
+                    result.exception_info.exception_type if result.exception_info is not None else "AgentSetupError",
+                    result.trial_uri,
+                )
 
         async def grade(messages, *, stop_reason, outputs) -> GradeResult:
             nonlocal generation_stop_reason

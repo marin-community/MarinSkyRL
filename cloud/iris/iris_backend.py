@@ -9,6 +9,7 @@ the same document to every task; it has no user-facing option parser.
 from __future__ import annotations
 
 import base64
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -644,6 +645,8 @@ def _effective_gdn_backend(args: SimpleNamespace) -> str:
 
 def _rl_config_uses_daytona(config: DictConfig) -> bool:
     """Return whether the configured task backend requires Daytona credentials."""
+    if OmegaConf.select(config, "skyrl.environment.task_sessions.daytona") is not None:
+        return True
     uses_harbor = str(config.runtime.entrypoint) in {
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
@@ -816,6 +819,12 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ[DAYTONA_RL_SECRET_NAME] = daytona_api_key
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
+
+        # The optional execution stack is loaded only for a Daytona run. Snapshot
+        # failures must escape here, before submitting the expensive GPU gang.
+        from cloud.iris.daytona_preflight import prepare_daytona_snapshots  # noqa: PLC0415
+
+        asyncio.run(prepare_daytona_snapshots(args.config))
 
     command = build_config_task_command(args)
 

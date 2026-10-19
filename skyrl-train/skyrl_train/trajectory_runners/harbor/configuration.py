@@ -13,7 +13,13 @@ from skyrl_train.utils.harbor_errors import (
     retry_excluded_exception_types,
 )
 
-from skyrl_train.rollouts.harbor_settings import EnvironmentConfig, EnvironmentType, RetryConfig, VerifierConfig
+from skyrl_train.rollouts.harbor_settings import (
+    HARBOR_ENVIRONMENT_KWARGS,
+    EnvironmentConfig,
+    EnvironmentType,
+    RetryConfig,
+    VerifierConfig,
+)
 
 
 @dataclass
@@ -54,10 +60,7 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         "override_storage_mb": FieldMapping("override_storage_mb"),
         "override_gpus": FieldMapping("override_gpus"),
         "environment_type": FieldMapping("type", default=EnvironmentType.DAYTONA.value),
-        "env_network_policy": FieldMapping("network_policy", field_type="kwargs"),
-        "ttl_minutes": FieldMapping("ttl_minutes", field_type="kwargs"),
-        "daytona_api_key_env": FieldMapping("api_key_env", field_type="kwargs"),
-        "eval_daytona_api_key_env": FieldMapping("eval_api_key_env", field_type="kwargs"),
+        **{name: FieldMapping(target, field_type="kwargs") for name, target in HARBOR_ENVIRONMENT_KWARGS.items()},
     }
 )
 
@@ -281,28 +284,7 @@ class HarborConfigBuilder:
 
     def environment_config(self) -> EnvironmentConfig:
         """Build EnvironmentConfig from config."""
-        env_fields = {}
-        env_kwargs = {}
-
-        for yaml_key, mapping in ENVIRONMENT_SCHEMA.fields.items():
-            value = self._get_field_value(yaml_key, mapping)
-            if value is not None:
-                if mapping.field_type == "kwargs":
-                    # Pass through to environment kwargs
-                    env_kwargs[mapping.harbor_field] = value
-                elif mapping.harbor_field == "type":
-                    # Special handling for environment type
-                    if isinstance(value, str):
-                        value = EnvironmentType(value)
-                    env_fields[mapping.harbor_field] = value
-                else:
-                    env_fields[mapping.harbor_field] = value
-
-        # Add kwargs if any were collected
-        if env_kwargs:
-            env_fields["kwargs"] = env_kwargs
-
-        return EnvironmentConfig(**env_fields)
+        return EnvironmentConfig.from_harbor_config(self._harbor_cfg)
 
     def verifier_config(self) -> VerifierConfig:
         """Build VerifierConfig from config."""

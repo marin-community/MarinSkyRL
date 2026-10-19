@@ -76,7 +76,7 @@ from skyrl_train.rollouts.task_projections import (
     WholeTaskProjection,
     logprobs_requested,
 )
-from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+from skyrl_train.utils.harbor_errors import ErrorHandlingConfig, HarborAgentStartupError
 from skyrl_train.trajectory_runners.types import (
     RESPONSE_POLICY_STEPS_KEY,
     ROUTED_EXPERTS_KEY,
@@ -284,6 +284,10 @@ def _failed_rollout(
         diagnostics["cause_error_type"] = type(error).__name__
     elif isinstance(error, TaskMachineError):
         exception_type = "TaskMachineError"
+    elif isinstance(error, HarborAgentStartupError):
+        exception_type = error.exception_type
+        diagnostics["harbor_trial_uri"] = error.trial_uri
+        diagnostics["cause_error_type"] = type(error).__name__
     elif interruption.operation in {RolloutOperation.START, RolloutOperation.PREPARE}:
         exception_type = VERIFIER_RUNTIME_ERROR
         diagnostics.setdefault("cause_error_type", type(error).__name__)
@@ -353,12 +357,15 @@ class TaskRolloutWorker:
         shutdown_timeout: float,
         installed_agents: InstalledAgentWorker | None = None,
         judge_connection: JudgeConnection | None = None,
+        session_overrides: Mapping[str, Any] | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
         self.judge_connection = judge_connection
+        self.session_overrides = dict(session_overrides or {})
         self.factories = {name: OwnedMachineFactory(factory, name) for name, factory in factories.items()}
         self.active_requests: set[asyncio.Task] = set()
+        self.cancelled_rollouts: set[asyncio.Task] = set()
         self.closing = False
         self.shutdown_timeout = shutdown_timeout
         self.chat_template_kwargs = dict(trajectory_runner_cfg.get("chat_template_kwargs", {}))
@@ -409,6 +416,9 @@ class TaskRolloutWorker:
     def _configured_task_and_sessions(
         self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str, phase: str
     ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
+        if self.session_overrides:
+            session = type(lowered.session).model_validate({**lowered.session.model_dump(), **self.session_overrides})
+            lowered = lowered.model_copy(update={"session": session})
         sessions = self.sessions
         if lowered.session.task_session == HARBOR_TRIAL_SESSION:
             if harbor is None or self.installed_agents is None:
@@ -472,17 +482,28 @@ class TaskRolloutWorker:
             task = lowered.task
             harbor = harbor_settings[index]
             session_id = session_ids[index]
+            generation_closed = False
+            model_calls: set[asyncio.Task] = set()
 
             async def model(request):
-                return await _model_turn(
-                    self.model_client,
-                    request,
-                    sampling_params=sampling,
-                    max_context_length=max_context_length,
-                    max_prompt_length=max_input_length,
-                    chat_template_kwargs=self.chat_template_kwargs,
-                    session_id=session_id,
+                if generation_closed:
+                    raise asyncio.CancelledError
+                call = asyncio.create_task(
+                    _model_turn(
+                        self.model_client,
+                        request,
+                        sampling_params=sampling,
+                        max_context_length=max_context_length,
+                        max_prompt_length=max_input_length,
+                        chat_template_kwargs=self.chat_template_kwargs,
+                        session_id=session_id,
+                    )
                 )
+                model_calls.add(call)
+                try:
+                    return await call
+                finally:
+                    model_calls.discard(call)
 
             engine = RolloutEngine(
                 model,
@@ -499,9 +520,27 @@ class TaskRolloutWorker:
             )
             retries = 0
             while True:
-                try:
+
+                async def execute():
                     async with harbor_slots, self.task_slots:
-                        result = await engine.run(lowered)
+                        return await engine.run(lowered)
+
+                operation = asyncio.create_task(execute())
+                try:
+                    result = await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    # Fence inference before acknowledging the discarded group. Container
+                    # deletion and evidence publication retain ownership in the worker and
+                    # must not consume the coordinator's inference-cancellation deadline.
+                    generation_closed = True
+                    operation.cancel()
+                    self.cancelled_rollouts.add(operation)
+                    operation.add_done_callback(self._cancelled_rollout_finished)
+                    calls = tuple(model_calls)
+                    for call in calls:
+                        call.cancel()
+                    await asyncio.gather(*calls, return_exceptions=True)
+                    raise
                 except RolloutInterrupted as interruption:
                     result = _failed_rollout(interruption, lowered)
                 if (
@@ -550,6 +589,11 @@ class TaskRolloutWorker:
                 )
         return rollouts
 
+    def _cancelled_rollout_finished(self, task: asyncio.Task) -> None:
+        self.cancelled_rollouts.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.opt(exception=error).error("Discarded rollout cleanup failed")
+
     async def run(self, input_batch: TaskRequestBatch) -> TrajectoryBatch:
         with self._active_request():
             outputs = await self.generate(input_batch)
@@ -585,6 +629,13 @@ class TaskRolloutWorker:
                 if remaining:
                     logger.error("Task worker shutdown deadline expired with {} active rollouts", len(remaining))
                     failures.append(TimeoutError("Task rollouts did not stop before the shutdown deadline"))
+            if self.cancelled_rollouts:
+                _, remaining = await asyncio.wait(
+                    tuple(self.cancelled_rollouts),
+                    timeout=max(0, deadline - asyncio.get_running_loop().time()),
+                )
+                if remaining:
+                    failures.append(TimeoutError("Discarded rollout cleanup exceeded the shutdown deadline"))
             results = await asyncio.gather(
                 *(factory.close(deadline) for factory in self.factories.values()), return_exceptions=True
             )
@@ -690,4 +741,7 @@ class TaskRolloutWorkerSpec:
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
             installed_agents=installed_agents,
             judge_connection=judge,
+            session_overrides=OmegaConf.to_container(
+                self.config.environment.task_sessions.get("overrides", {}), resolve=True
+            ),
         )

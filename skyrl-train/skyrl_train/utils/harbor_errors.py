@@ -9,6 +9,17 @@ from loguru import logger
 from skyrl_train.error_treatment import ErrorTreatment
 
 
+class HarborAgentStartupError(RuntimeError):
+    """A Harbor trial ended without requesting any model completion."""
+
+    def __init__(self, exception_type: str, trial_uri: str):
+        self.exception_type = exception_type
+        self.trial_uri = trial_uri
+        # Original messages can contain signed model endpoints. Keep them in the
+        # access-controlled Harbor archive, not the projected training record.
+        super().__init__(f"Harbor agent failed before inference: {exception_type}")
+
+
 class ErrorCategory(StrEnum):
     INFRASTRUCTURE = "infrastructure"
     AGENT = "agent"

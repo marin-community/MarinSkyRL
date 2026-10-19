@@ -88,6 +88,20 @@ async def _lease_is_blocked(buffer: RolloutBuffer) -> bool:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_lease_rejects_late_commit_and_releases_capacity(batch_policy):
+    buffer = _buffer(batch_policy, batch_size=2, max_in_flight=2)
+    await buffer.publish(1)
+    abandoned = await buffer.acquire_lease()
+    completed = await buffer.acquire_lease()
+    await _commit(buffer, completed.lease_id, "completed")
+    assert await buffer.cancel_leases([abandoned.lease_id, completed.lease_id]) == [abandoned.lease_id]
+    await _commit(buffer, abandoned.lease_id, "late")
+    await _generate(buffer, "replacement")
+    payloads, _ = await _take_batch(buffer)
+    assert payloads == ["completed", "replacement"]
+
+
+@pytest.mark.asyncio
 async def test_on_policy_leases_one_batch_per_published_step(batch_policy):
     buffer = _buffer(batch_policy, batch_size=2, max_staleness_steps=0)
     assert await _lease_is_blocked(buffer)

@@ -348,6 +348,7 @@ def _training_batch(
         rewards=rewards,
         verification_results=verification,
         evidence_messages=[[dict(message) for message in rollout.messages] for rollout in rollouts],
+        token_trace_available=[bool(rollout.response_token_ids) for rollout in rollouts],
         loss_masks=masks,
         stop_reasons=[rollout.stop_reason for rollout in rollouts],
         rollout_metrics={},

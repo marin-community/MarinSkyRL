@@ -80,7 +80,9 @@ def test_step_end_checkpoint_and_evaluation_are_distinct_exclusive_phases():
     trainer.eval_trajectory_runner = trainer.context
     trainer.eval_trajectory_sink = None
     trainer._inference_engines_configured = lambda: False
-    trainer.cfg = OmegaConf.create({"trainer": {}, "trajectory_runner": {"max_concurrent_tasks": 2}})
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"eval_drain_timeout_seconds": 1}, "trajectory_runner": {"max_concurrent_tasks": 2}}
+    )
 
     async def callback(event, _state, current_control, **_kwargs):
         clock.advance(1)
@@ -140,7 +142,10 @@ def test_pretraining_evaluation_is_startup_only():
     trainer.global_step = 0
     trainer.all_timings = {}
     trainer.cfg = OmegaConf.create(
-        {"trainer": {"tracker_commit_each_step": True}, "trajectory_runner": {"max_concurrent_tasks": 2}}
+        {
+            "trainer": {"tracker_commit_each_step": True, "eval_drain_timeout_seconds": 1},
+            "trajectory_runner": {"max_concurrent_tasks": 2},
+        }
     )
     trainer.context = EvaluationLifecycle()
     trainer.eval_trajectory_runner = trainer.context
@@ -157,7 +162,7 @@ def test_pretraining_evaluation_is_startup_only():
     asyncio.run(trainer._run_pretraining_evaluation(state))
 
     assert trainer.all_timings == {}
-    assert logged[0] == ({"eval/score": 0.5}, {"step": 0, "commit": True})
+    assert logged[0] == ({"eval/score": 0.5, "eval/drain_discarded_groups": 0}, {"step": 0, "commit": True})
     assert logged[1][0]["startup/eval_before_train"] >= 0
     assert logged[1][1] == {"step": 0, "commit": False}
     assert mirrored[1][1]["kind"] == "startup"
