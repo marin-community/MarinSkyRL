@@ -66,7 +66,8 @@ their existing schema; ordinary chosen-token-only TIS keeps its existing path.
 
 For K128, collection retains the old 129-candidate request and reproduces the old chat display limit before
 selecting the head. This preserves token identity at tied probability boundaries, including when the sampled
-token is inside or outside the natural head. Scores remain normalized over the full vocabulary. The adapter
+token is inside or outside the natural head. Scores use the full vocabulary normalizer and the pinned chat
+API's -9999 floor before token-ID tie ordering. The adapter
 clones sampling parameters, isolates concurrent captures and closes the public generator on cancellation.
 Empty aborts have zero-row arrays; resumed chunks retain their token alignment, heads and source versions.
 
@@ -128,6 +129,12 @@ minibatches' current/old divergence. Scalar correction size and retained mass do
 change or predict a learning gain. Repeated correction or mismatch across prompt groups can justify a small
 matched TIS-versus-SC learning comparison; the comparison must establish any benefit.
 
+Near unit retained mass, subtracting head mass makes the modeled tail sensitive to floating point rounding.
+The recorded tail floor fraction flags that regime. A retained Qwen case differed by 0.002755 between FP32
+and FP64 scalar replay of the same quantized heads. This does not measure parameter-gradient error;
+interpret small corrections together with mass and tail floor metrics in the
+[precision evidence](https://github.com/yonromai/marin/blob/e4d85ef4fa57cfdbbd1f652780d3cdf72bb1f161/experiments/post_training/score_centering_integration/evidence/qwen-final-a1-probe-precision.json).
+
 ### Routine metrics and continuous-head diagnostics
 
 Ordinary `trainer.training_metrics` uses already available chosen-token probabilities and policy-step tags.
@@ -149,6 +156,17 @@ The sampled-token count uses that same averaging.
 The sample takes the first valid tokens and does not estimate the response tail. These scalar correction
 values measure a loss term, not parameter-gradient change. They require no additional model forward.
 Leaving this count zero avoids the new diagnostics. Ordinary telemetry does not enable head capture.
+
+## Current integration qualification
+
+Numeric transport source `87f13fcd82b4677545816e0789c685d10cf051a0`, executed through benchmark runtime
+`92d057c561b0893a3d922e42f221eb8d5b1e68fb`, passed 126 CPU adapter checks and a complete 35-update native
+Qwen qualification. All four old/new chat comparisons matched exactly at temperatures 1.0 and 0.7 through
+4096 tokens; actual causal head references had maximum error below 2e-6. The
+[integration record](https://github.com/yonromai/marin/tree/e4d85ef4fa57cfdbbd1f652780d3cdf72bb1f161/experiments/post_training/score_centering_integration)
+retains source pins, formatter edge cases, complete reports, controls and allocation accounting. Matched
+Snowball serialized costs and real asynchronous throughput remain pending batch capacity. Qwen and CPU
+representation timings do not establish those costs.
 
 ## Prior Snowball qualification and cost
 
