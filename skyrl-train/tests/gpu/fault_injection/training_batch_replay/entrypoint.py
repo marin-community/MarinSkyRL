@@ -17,7 +17,6 @@ from skyrl_train.rollouts.context import TrainingContext
 from skyrl_train.trainer import build_models
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import ResumeMode
-from tests.gpu.utils import import_worker
 from tests.training_batch_replay import (
     BatchReplayProvenance,
     CapturingRayPPOTrainer,
@@ -27,6 +26,7 @@ from tests.training_batch_replay import (
     replay_policy_forward,
     validate_artifact_destination,
 )
+from tests.gpu.utils import import_worker
 
 
 class Mode(StrEnum):
