@@ -97,6 +97,7 @@ def profile_summary(profile):
             "_create_chat_logprobs",
             "_get_top_logprobs",
             "select_flat_response_topk",
+            "select_flat_chat_response_topk",
         ):
             row = selected.setdefault(name, {"calls": 0, "own_seconds": 0, "cumulative_seconds": 0})
             row["calls"] += calls
@@ -841,7 +842,7 @@ class PerformanceTrainer(RayPPOTrainer):
                 old_chat = await engine.chat_completion(
                     {"json": dict(body), "headers": {"x-request-id": f"display-{temperature}-{response_length}"}}
                 )
-                compact_body = {**body, "top_logprobs": 128}
+                compact_body = dict(body)
                 new_chat = await engine.chat_completion(
                     {
                         "json": compact_body,
