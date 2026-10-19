@@ -180,20 +180,57 @@ follow-up uses the standard evaluation runner's step-0 lease, explicit
 sampled-token logprobs in evaluation sampling, and a fail-closed scored-coverage
 check. Fresh job IDs and output prefixes are required to retry both models.
 
+With the step-0 policy lease and `eval_sampling_params.logprobs: 0` on SkyRL
+`0721e2d6`, **both** independent evaluation jobs reached terminal success:
+`/zack/pi-beta-student-eval-step1-20261019-r3` (`eval-attempt-20-step1`)
+and `/zack/pi-beta-student-eval-step0-20261019-r3`
+(`eval-attempt-21-step0`). Each sampled and graded eight distinct held-out
+physical tasks, with verifier coverage `8/8`. Every task scored zero for
+both models (`avg_score=0.0`, `pass_at_1=0.0`), and every response stopped at
+the 256-token length limit. The saved SFT policy was loaded via its step-1 HF
+export, but **no improvement was measured**. Per-task eval records were saved
+under each attempt's `exports/dumped_evals/eval_only/`. A more discriminative
+eval needs enough answer budget and tasks on which at least one model produces
+a verified pass; the equal all-zero scores are only a valid integration result.
+
+The first physical verifier-GRPO attempt used the disjoint eight-task
+`input/verifier-grpo-v1/tasks.parquet` pack, two student samples per prompt,
+sampled-token logprobs and a 512-token per-turn cap. Iris job
+`/zack/pi-beta-verifier-grpo-gb200-20261019-o` (`grpo-attempt-22`) failed
+before the first optimizer step: one trial returned corrupted numbered
+in-memory evidence (invalid base64) and another failed at grading with
+`ValidationError`. The shared worker refused to substitute missing trial
+evidence, so **no physical GRPO group or update has been validated**. Do not
+retry the GPU job unchanged. One disposable Daytona/Qwen3-tokenizer probe
+completed a scripted 361-token student response with 361 sampled logprobs;
+this does not reproduce the intermittent corrupt frame. A six-trial follow-up
+failed during the Pi/NVM setup before any student trial ran. Reproduce the
+stdout transport and verifier artifact failures in disposable CPU sandboxes
+first, without retaining raw Pi stdout or treating diagnostic logs as
+trajectory evidence.
+
 Next smoke gates, in order:
 
-1. Independently load the saved step-1 student checkpoint and run student-only
-   Harbor evaluation with the shared evaluation runner. Record per-task outcomes
-   separately from the teacher training run; compare to a step-0 student baseline.
-2. Run a physical verifier-GRPO **baseline** group with two independently sampled
-   Pi trials per prompt, exact per-turn sampled logprobs, task-verifier grades,
-   nonzero group advantage and a checkpointed GPU update. Never copy one trial
-   to manufacture a group member.
+1. The saved step-1 student was independently loaded and evaluated against the
+   step-0 baseline, with separate per-task records; both scored 0/8 under the
+   256-token cap. Repeat with a meaningful answer budget and tasks that produce
+   valid, non-degenerate outcomes before drawing learning conclusions.
+2. Fix the diagnosed in-memory stdout transport and separate-grader artifact
+   failures locally, then run a physical verifier-GRPO **baseline** group with
+   two independently sampled Pi trials per prompt, exact per-turn sampled
+   logprobs, task-verifier grades, nonzero group advantage and a checkpointed
+   GPU update. Never copy one trial to manufacture a group member.
 3. Before GPU distribution distillation, test an installed Pi student task
    against a real independently pinned vLLM teacher oracle on CPU/small GPU,
    with exact token alignment, masked tool context and an actual shared-trainer
-   teacher-loss update. Then do a one-step, disjoint-teacher GPU smoke with a
-   fresh attempt ID and output prefix; do not infer quality improvement.
+   teacher-loss update. The earlier Qwen2.5-0.5B teacher cannot score Qwen3
+   token IDs: their vocabulary fingerprints differ (`8f16caac…` versus
+   `3689317f…`). Pinned `Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e`
+   matches the Qwen3-0.6B student's vocabulary fingerprint and is an
+   independent teacher-weight source for the next **integration** test; no
+   teacher-quality claim follows from this check. Then do a one-step,
+   disjoint-teacher GPU smoke with a fresh attempt ID and output prefix; do
+   not infer quality improvement.
 4. Only after a separate post-trial judge returns identity, score and provenance
    without overwriting verifier evidence, run a physical AI-judged GRPO group.
    DAgger and critique→revision each need their own connected objective/source
