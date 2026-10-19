@@ -25,6 +25,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_serving import rank0_validation_snapshot
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
@@ -36,6 +37,8 @@ from tests.gpu.test_grug_megatron import (
 from tests.gpu.utils import init_worker_with_type
 
 TOPK = 4
+NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
+NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
 PARAMETER_NAMES = [
     "model.layers.0.self_attn.q_proj.weight",
     "model.layers.3.self_attn.q_proj.weight",
@@ -114,8 +117,15 @@ def test_old_logprob_forward_replays_captured_routes(tmp_path, packing: bool):
 
 
 @pytest.mark.parametrize("packing", [False, True], ids=["unpacked", "packed"])
-def test_training_step_replays_and_recomputes(tmp_path, packing: bool):
+@pytest.mark.parametrize("recompute_modules", [None, ["layernorm"], ["moe"]], ids=["full", "norm", "moe"])
+def test_training_step_replays_and_recomputes(tmp_path, packing: bool, recompute_modules):
     cfg, model_path = _replay_config(tmp_path, packing=packing)
+    if recompute_modules is not None:
+        transformer = cfg.trainer.policy.megatron_config.transformer_config_kwargs
+        transformer.recompute_granularity = "selective"
+        transformer.recompute_method = None
+        transformer.recompute_num_layers = None
+        transformer.recompute_modules = recompute_modules
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     batch = _routed_batch(pad_token_id, routes="random")
     initialize_ray(cfg)
@@ -125,6 +135,7 @@ def test_training_step_replays_and_recomputes(tmp_path, packing: bool):
         assert status["router_replay/hit_fraction"] == 1.0, status
         assert 0.0 <= status["router_replay/sentinel_fraction"] < 1.0, status
         assert math.isfinite(status["policy_loss"])
+        assert math.isfinite(status["raw_grad_norm"])
     finally:
         ray.shutdown()
 
