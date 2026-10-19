@@ -26,6 +26,7 @@ from ray.exceptions import ActorDiedError
 
 import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
 import skyrl_train.tokenizer as tokenizer_module
+from skyrl_train.config.dummy_engine_weights import validate_dummy_engine_weights
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints import main_base
 
@@ -150,22 +151,42 @@ def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
     assert captured["engine_init_kwargs"]["tokenizer_revision"] == "tokenizer-commit"
 
 
-def test_from_config_streams_object_store_policy_weights(monkeypatch):
+@pytest.mark.parametrize(
+    ("load_format", "transport"),
+    [(None, "broadcast"), ("dummy", "expert_block"), ("Dummy", "expert_block"), ("dummy", "broadcast")],
+)
+def test_from_config_selects_weight_load_mode_for_object_store_policy(monkeypatch, load_format, transport):
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = False
     cfg.trainer.policy.model.path = "/tmp/model-metadata"
     cfg.trainer.policy.model.source_uri = "s3://models/policy"
     cfg.trainer.policy.model.source_identity = "sha256:" + "a" * 64
     cfg.trainer.policy.model.revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
     cfg.trainer.policy.model.tokenizer_path = "/tmp/tokenizer-metadata"
 
+    cfg.generator.weight_sync_transport = transport
+    if load_format is not None:
+        OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", load_format, force_add=True)
+
+    if load_format is not None and transport == "broadcast":
+        with pytest.raises(ValueError, match="weight_sync_transport=expert_block"):
+            validate_dummy_engine_weights(cfg)
+        return
+    validate_dummy_engine_weights(cfg)
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
-    assert captured["pretrain"] == "s3://models/policy"
-    assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
-    assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
-    assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
+    if load_format is not None:
+        assert captured["pretrain"] == "/tmp/model-metadata"
+        assert captured["engine_init_kwargs"]["load_format"] == "dummy"
+        assert "model_loader_extra_config" not in captured["engine_init_kwargs"]
+        assert rwie.MODEL_METADATA_PATH_KEY not in captured["engine_init_kwargs"]
+    else:
+        assert captured["pretrain"] == "s3://models/policy"
+        assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
+        assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
+        assert captured["engine_init_kwargs"][rwie.MODEL_METADATA_PATH_KEY] == "/tmp/model-metadata"
     assert captured["engine_init_kwargs"]["tokenizer"] == "/tmp/tokenizer-metadata"
     assert "revision" not in captured["engine_init_kwargs"]
 
