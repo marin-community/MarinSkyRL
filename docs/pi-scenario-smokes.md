@@ -233,7 +233,16 @@ opt-in tests use the SkyRL CPU engine with a vLLM-compatible HTTP bridge,
 producer now labels malformed evidence by fixed, content-free frame shape
 (missing separator, invalid header, empty or oversized fragment) to locate
 the transport fault on a fresh trial without retaining stdout or leaking task
-content; the earlier failed GPU attempt cannot be classified retroactively. Do not reuse the old 256-/512-token launch YAMLs or any spent
+content; the earlier failed GPU attempt cannot be classified retroactively. The next
+one-task step-1 GPU diagnostic (`eval-attempt-25-step1-debug`, Iris job
+`/zack/pi-beta-student-eval-step1-20261019-r5`) **succeeded** with those new
+limits and the diagnostic Harbor pin. Its single student Pi trial produced
+2,048 sampled response tokens, stopped for length, received an independently
+attributed task-verifier grade (`score=0`), and was counted in `num_scored=1/1`
+under `exports/dumped_evals/eval_only/`. This is a live long-response
+transport/grading integration pass, **not** model improvement, a solved task,
+a full eight-task evaluation, or evidence that the intermittent concurrent
+frame corruption and separate-verifier timeouts are fixed. Do not reuse the old 256-/512-token launch YAMLs or any spent
 attempt IDs/output prefixes; ensure fresh launch configs inherit the preset
 budget without a smaller ad-hoc override. The larger budget does not repair
 corrupt in-memory evidence, separate-verifier timeouts, or all-zero GRPO
