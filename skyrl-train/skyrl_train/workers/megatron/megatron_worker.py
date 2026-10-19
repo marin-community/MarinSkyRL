@@ -640,6 +640,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return float(self.optimizer.get_grad_norm())
 
     def _probe_apply_optimizer(self):
+        if self.empty_cuda_cache:
+            torch.cuda.empty_cache()
         with self._probe_timing.span("megatron_optimizer_step"):
             result = self.strategy.optimizer_step(
                 self.optimizer,
