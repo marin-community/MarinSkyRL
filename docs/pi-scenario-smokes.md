@@ -270,12 +270,42 @@ budget without a smaller ad-hoc override. The larger budget does not repair
 corrupt in-memory evidence, separate-verifier timeouts, or all-zero GRPO
 advantage.
 
+### Live Daytona/GPU-vLLM concurrency replay (2026-10-19)
+
+To exercise the *actual* transport instead of the CPU bridge or local Docker,
+we loaded the pinned step-1 Qwen policy through the normal GPU vLLM engine and
+ran distinct Harbor tasks in Daytona at concurrency **2, 4, and 8**. All used
+8,192-token context, at most 2,048 sampled tokens per turn, a separately
+attributed task verifier, and a fresh job/attempt/data/output prefix:
+
+| Daytona trials | Iris job suffix | Attempt | Independently graded | Passed | Length stops |
+| ---: | --- | --- | ---: | ---: | ---: |
+| 2 | `r6` | `eval-attempt-26-step1-daytona-pair` | 2/2 | 2/2 | 0 |
+| 4 | `r7` | `eval-attempt-27-step1-daytona-four` | 4/4 | 4/4 | 0 |
+| 8 | `r8` | `eval-attempt-28-step1-daytona-eight` | 8/8 | 8/8 | 0 |
+
+Each of the 14 trials recorded two completed model requests and
+`agent:run_complete` in its bounded journal; no fresh trial reported a
+malformed evidence frame. The eight-task evaluation averaged 611.75 response
+tokens (maximum 1,255) and had complete verifier coverage. Iris logs did
+contain verifier-timeout exception class names, but **all final records were
+independently scored**; those log occurrences alone do not establish a final
+verification failure or explain the previous run. We removed raw/unchecked
+artifacts for each new attempt after inspecting their metrics, leaving only
+schema-checked content-free attempt journals and numeric aggregate eval
+metrics. These successful replays do **not** prove that the earlier eight-task
+frame corruption is fixed or that Daytona is reliable under repeated load.
+These are different tasks, **not** a two-member GRPO group for one prompt;
+there is no GRPO optimizer update. The 8/8 step-1 task pass rate is also
+**not a learning-improvement result** without a matched step-0 evaluation at
+these new limits.
+
 Next smoke gates, in order:
 
-1. The saved step-1 student was independently loaded and evaluated against the
-   step-0 baseline, with separate per-task records; both scored 0/8 under the
-   256-token cap. Repeat with a meaningful answer budget and tasks that produce
-   valid, non-degenerate outcomes before drawing learning conclusions.
+1. The saved step-1 student and step-0 baseline both scored 0/8 under the old
+   256-token cap. Step 1 now scored 8/8 on eight Daytona tasks at 8,192/2,048,
+   but step 0 has **not** been evaluated on that same pack/budget. Run that
+   matched baseline before drawing any learning conclusion.
 2. Diagnose the in-memory stdout transport and separate-verifier timeouts
    locally, then run a physical verifier-GRPO **baseline** group with
    two independently sampled Pi trials per prompt, exact per-turn sampled
