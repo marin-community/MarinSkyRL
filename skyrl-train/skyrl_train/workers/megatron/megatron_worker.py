@@ -371,13 +371,13 @@ class MegatronWorker:
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        channels = self.cfg.trainer.policy.megatron_config.nccl_max_channels
+        config = self.cfg.trainer.policy.megatron_config
+        channels = config.nccl_max_channels
         if channels is not None:
-            config = self.cfg.trainer.policy.megatron_config
             if (
                 not self.cfg.trainer.algorithm.batch_invariant
                 or config.tensor_model_parallel_size != 1
-                or (config.expert_tensor_parallel_size not in (None, 1))
+                or config.expert_tensor_parallel_size not in (None, 1)
             ):
                 raise ValueError("nccl_max_channels requires a batch-invariant TP1/ETP1 policy")
             if not isinstance(channels, int) or isinstance(channels, bool) or channels < 1:
