@@ -22,7 +22,8 @@ version = "2.1.0"
 The configuration file must stay inside the task package. Missing files or checksum
 mismatches fail before agent startup; Daytona launch preflight also checks them before GPU
 submission. The task materializer preserves the prompt file and metadata in Parquet exports.
-Source profiles select registered agents; they cannot request arbitrary host import paths.
+Source profiles select agents by name and supply `kwargs`; they cannot request host import
+paths. Harbor validates the selected agent name when constructing the trial.
 
 Select the agent in `skyrl.terminal_bench_config.installed_agent.agent` in the launch YAML.
 Source settings supply defaults for that configuration. Fields supplied by the run override

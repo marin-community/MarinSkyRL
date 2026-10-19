@@ -168,7 +168,9 @@ class InstalledAgentRuntime:
         try:
             task_dir = evidence / "task"
             restore_harbor_trial_task(lowered.task, task_dir)
-            source_agent = task_agent_config(task_dir, config.agent)
+            source_agent = AgentConfig.model_validate(
+                task_agent_config(task_dir, config.agent.model_dump(exclude_unset=True))
+            )
             package = PackageConfig.model_validate_toml((task_dir / "task.toml").read_text())
             context = task_dir / "environment"
             source = (
