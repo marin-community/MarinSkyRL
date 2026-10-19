@@ -4,11 +4,18 @@ from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, Self
 
 import numpy as np
 
 from skyrl_train.inference_engines.response_topk import ResponseTopK, select_flat_chat_response_topk
+
+
+class ChatSamplingParams(Protocol):
+    logprobs: int | None
+    flat_logprobs: bool
+
+    def clone(self) -> Self: ...
 
 
 @dataclass
@@ -44,7 +51,9 @@ class CompactChatEngineClient:
         finally:
             self._capture.reset(token)
 
-    async def generate(self, prompt: Any, sampling_params: Any, request_id: str, **kwargs: Any) -> AsyncGenerator:
+    async def generate(
+        self, prompt: Any, sampling_params: ChatSamplingParams, request_id: str, **kwargs: Any
+    ) -> AsyncGenerator:
         capture = self._capture.get()
         if capture is not None:
             sampling_params = sampling_params.clone()
