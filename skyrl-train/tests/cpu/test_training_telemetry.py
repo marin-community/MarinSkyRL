@@ -176,8 +176,8 @@ async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrain
         inference_engine_client=FakeEngines(),
         trajectory_runner=runner,
         context=TrainingContext.from_config(cfg, dataset, runner),
+        models=(FakePolicyGroup(), None, None),
     )
-    trainer.policy_model, trainer.ref_model, trainer.critic_model = FakePolicyGroup(), None, None
     trainer.tokenizer = SimpleNamespace(decode=str, pad_token_id=0)
 
     async def no_op(*args, **kwargs):

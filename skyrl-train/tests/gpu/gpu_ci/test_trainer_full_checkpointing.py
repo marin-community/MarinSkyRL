@@ -26,7 +26,7 @@ from transformers import AutoTokenizer
 from skyrl_train.rollouts.context import TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer, build_models
 from tests.gpu.utils import import_worker, ray_init_for_tests
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -116,8 +116,18 @@ def create_minimal_trainer(cfg: DictConfig):
         config=cfg,
     )
 
+    models = build_models(
+        cfg,
+        tokenizer,
+        train_dataset,
+        import_worker(cfg.trainer.strategy, "policy"),
+        import_worker(cfg.trainer.strategy, "critic"),
+        import_worker(cfg.trainer.strategy, "ref"),
+    )
+
     # Create trainer (no inference engine needed for checkpointing tests)
     trainer = RayPPOTrainer(
+        models=models,
         cfg=cfg,
         tracker=tracker,
         tokenizer=tokenizer,
@@ -171,13 +181,6 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
 
         trainer1 = create_minimal_trainer(cfg)
 
-        # Get worker classes
-        PolicyWorker = import_worker(strategy, "policy")
-        CriticWorker = import_worker(strategy, "critic")
-        RefWorker = import_worker(strategy, "ref")
-
-        # Build models
-        trainer1.build_models(PolicyWorker, CriticWorker, RefWorker)
         if strategy == "megatron":
             # A real optimizer step initializes Adam moments, which the checkpoint must preserve.
             # Keep this Megatron-only fixture out of non-Megatron test collection.
@@ -242,9 +245,6 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         cfg_resume.trainer.ckpt_path = cfg.trainer.ckpt_path
 
         trainer2 = create_minimal_trainer(cfg_resume)
-
-        # Build models again
-        trainer2.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         # Load checkpoints
         loaded_global_step, loaded_checkpoint_dir = trainer2.load_checkpoints()
