@@ -517,12 +517,30 @@ def grug_layer_spec(config: TransformerConfig) -> ModuleSpec:
     )
 
 
+class GrugTransformerBlock(TransformerBlock):
+    """Optionally retain full-checkpoint inputs in native PyTorch host storage."""
+
+    def forward(self, *args, **kwargs):
+        # The final stage has few inputs in flight and saves its uncheckpointed
+        # final norm here. Leave that stage on device to keep host copies bounded.
+        offload = (
+            self.config.grug_checkpoint_cpu_offload
+            and not self.post_process
+            and self.training
+            and torch.is_grad_enabled()
+        )
+        if offload:
+            with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                return super().forward(*args, **kwargs)
+        return super().forward(*args, **kwargs)
+
+
 def grug_block_spec(config: TransformerConfig, vp_stage: int | None, pp_rank: int) -> ModuleSpec:
     """Build this pipeline stage's decoder block spec with Grug's gated final norm."""
 
     layer_spec = grug_layer_spec(config)
     num_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
     return ModuleSpec(
-        module=TransformerBlock,
+        module=GrugTransformerBlock,
         submodules=TransformerBlockSubmodules(layer_specs=[layer_spec] * num_layers, layer_norm=GrugGatedRMSNorm),
     )

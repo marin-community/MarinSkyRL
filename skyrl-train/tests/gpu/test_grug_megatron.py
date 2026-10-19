@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import ray
 import torch
+from omegaconf import open_dict
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
@@ -377,13 +378,18 @@ def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(
         ray.shutdown()
 
 
-def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
+@pytest.mark.parametrize("checkpoint_cpu_offload", [False, True], ids=["device", "checkpoint_cpu"])
+def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path, checkpoint_cpu_offload):
     world_size = 2
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
     write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=2, ep=1)
+    with open_dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs):
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs.grug_checkpoint_cpu_offload = (
+            checkpoint_cpu_offload
+        )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id)
     export_dir = tmp_path / "export"
