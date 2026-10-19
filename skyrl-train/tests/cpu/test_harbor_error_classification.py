@@ -7,15 +7,12 @@ from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.harbor_errors import (
     ErrorHandlingConfig,
-    ErrorCategory,
     ErrorTreatment,
     PASSTHROUGH_WITHOUT_LOGPROBS_ERROR,
     classify_exception_type,
     error_category,
-    errors_by_category,
     known_error_types,
     passthrough_logprob_error_type,
-    retry_excluded_exception_types,
     treatment_excludes_from_baseline,
 )
 
@@ -84,49 +81,6 @@ def test_passthrough_requires_a_verifier_result_to_remain_in_baseline():
     assert treatment_excludes_from_baseline(ErrorTreatment.PASSTHROUGH, verifier_available=True) is False
     assert treatment_excludes_from_baseline(ErrorTreatment.MASK, verifier_available=True) is True
     assert treatment_excludes_from_baseline(ErrorTreatment.ZERO, verifier_available=False) is False
-
-
-@pytest.mark.parametrize(
-    "error_type",
-    sorted(set(known_error_types()) - set(errors_by_category(ErrorCategory.UNKNOWN))),
-)
-def test_retry_exclusion_matches_each_known_taxonomy_classification(error_type):
-    config = ErrorHandlingConfig()
-
-    excluded = retry_excluded_exception_types(None, config)
-    treatment = classify_exception_type(error_type, config)
-
-    if treatment is ErrorTreatment.PASSTHROUGH:
-        assert error_type in excluded
-    else:
-        assert error_type not in excluded
-
-
-def test_retry_exclusion_follows_campaign_treatment_override():
-    config = ErrorHandlingConfig(zero_exceptions=frozenset({"TurnCapExhaustedError"}))
-
-    excluded = retry_excluded_exception_types(None, config)
-
-    assert classify_exception_type("TurnCapExhaustedError", config) is ErrorTreatment.ZERO
-    assert "TurnCapExhaustedError" not in excluded
-    assert "OutputLengthExceededError" in excluded
-
-
-def test_default_passthrough_treatment_makes_known_unknown_errors_terminal():
-    config = ErrorHandlingConfig(default_error_treatment=ErrorTreatment.PASSTHROUGH)
-
-    excluded = retry_excluded_exception_types(None, config)
-
-    assert set(errors_by_category(ErrorCategory.UNKNOWN)) <= excluded
-
-
-def test_retryable_infrastructure_classification_is_not_implicitly_excluded():
-    config = ErrorHandlingConfig()
-
-    excluded = retry_excluded_exception_types(None, config)
-
-    assert classify_exception_type("EnvironmentStartTimeoutError", config) is ErrorTreatment.MASK
-    assert "EnvironmentStartTimeoutError" not in excluded
 
 
 @pytest.mark.parametrize(

@@ -53,13 +53,23 @@ def test_final_answer_removes_reasoning_without_promoting_unfinished_work(text, 
     assert final_answer_text(text) == answer
 
 
-@pytest.mark.parametrize("opening,closing", [("<think>", "</think>"), ("<|start_think|>", "<|end_think|>")])
+@pytest.mark.parametrize(
+    "opening,closing,tool_only,verifyit_enabled",
+    [
+        ("<think>", "</think>", False, False),
+        ("<|start_think|>", "<|end_think|>", False, False),
+        ("", "", True, False),
+        ("", "", True, True),
+    ],
+)
 @pytest.mark.asyncio
 async def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_optional(
     nemotron_session,
     model_turn,
     opening,
     closing,
+    tool_only,
+    verifyit_enabled,
 ):
     record = {
         "schema_type": "json",
@@ -71,8 +81,20 @@ async def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_op
             }
         ),
     }
-    session = await nemotron_session("structured_outputs_simple_agent", record)
-    result = await session.advance(model_turn(opening + "not JSON" + closing + '{"required": 7, "extra": true}'))
+    message = None
+    text = opening + "not JSON" + closing + '{"required": 7, "extra": true}'
+    if tool_only:
+        record.update(response_mode="tool_call", tool_name="submit", tool_payload_key="payload")
+        text = ""
+        message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "submit", "arguments": '{"payload":{"required":7}}'}}
+            ],
+        }
+    session = await nemotron_session("structured_outputs_simple_agent", record, {"verifyit_enabled": verifyit_enabled})
+    result = await session.advance(model_turn(text, message=message))
     assert result.reward == 1.0
     assert grade_structured_output('{"optional":"x"}', record, {})[0] == 0.0
 
@@ -384,7 +406,7 @@ def test_judge_length_finish_cannot_be_accepted_as_partial_json(monkeypatch):
             {"choices": [{"finish_reason": "length", "message": {"content": '{"score_1":5}'}}]}
         ),
     )
-    with pytest.raises(ValueError, match="Incomplete judge response"):
+    with pytest.raises(ValueError, match="Truncated judge response"):
         OpenAIJudge(base_url="https://judge.example", model="judge").generate([])
 
 

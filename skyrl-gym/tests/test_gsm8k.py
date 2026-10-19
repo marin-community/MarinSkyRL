@@ -18,7 +18,9 @@ from skyrl_gym.envs.gsm8k.utils import compute_score
     ],
 )
 def test_task_grade_preserves_numeric_answer_formats(model_turn, output, ground_truth, expected):
-    result = grade_gsm8k(model_turn(output), {}, {"reward_spec": {"ground_truth": ground_truth}})
+    result = grade_gsm8k(
+        model_turn(output), {"reward_method": "strict"}, {"reward_spec": {"ground_truth": ground_truth}}
+    )
     assert result.reward == expected
     assert result.grade.reward == expected
 
@@ -27,6 +29,7 @@ def test_task_grade_preserves_numeric_answer_formats(model_turn, output, ground_
     "output, ground_truth, stop_reason, expected",
     [
         ("Work.\n#### 42", "42", "stop", 1.0),
+        ("Work.\n#### 42", "42", "complete", 1.0),
         ("Work.\n#### 42.0\n", "42", "eos", 1.0),
         ("Work.\n#### 1,234", "1234", "end_turn", 1.0),
         ("#### 42\nCorrection.\n#### 43", "42", "stop", 0.0),
@@ -36,19 +39,23 @@ def test_task_grade_preserves_numeric_answer_formats(model_turn, output, ground_
         ("Work.\n#### 42", "42", "error", 0.0),
         ("Work.\n#### 1,,234", "1234", "stop", 0.0),
         ("The answer is 42.", "42", "stop", 0.0),
+        ("The answer is #### 42", "42", "stop", 0.0),
+        ("#### $10", "10", "stop", 0.0),
     ],
 )
-def test_completed_final_line_reward(model_turn, output, ground_truth, stop_reason, expected):
+def test_default_reward_grades_the_completed_final_line(model_turn, output, ground_truth, stop_reason, expected):
     result = grade_gsm8k(
         model_turn(output, stop_reason=stop_reason),
-        {"reward_method": "final_line"},
+        {},
         {"reward_spec": {"ground_truth": ground_truth}},
     )
     assert result.reward == expected
 
 
 def test_prepared_reward_model_extras_reach_the_verifier(model_turn):
-    result = grade_gsm8k(model_turn("The answer is #### 42"), {}, {"reward_model": {"ground_truth": "42"}})
+    result = grade_gsm8k(
+        model_turn("The answer is #### 42"), {"reward_method": "strict"}, {"reward_model": {"ground_truth": "42"}}
+    )
     assert result.reward == 1.0
 
 
