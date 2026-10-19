@@ -12,6 +12,7 @@ from taskcompendium.grading_result import GradeResult, Outcome
 from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult, VerificationStatus
 
 VERIFICATION_SKIPPED = "verification_skipped"
+FOLDED_GRADE_HARNESSES = frozenset({"nemotron_ultra", "openenv"})
 
 
 def episode_prompt(task: TaskSpec) -> Prompt:

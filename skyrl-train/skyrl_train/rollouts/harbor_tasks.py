@@ -119,9 +119,9 @@ class HarborTaskSettings:
             case other:
                 raise ValueError(f"No Shellbox factory is configured for Harbor backend {other!r}")
 
-    def lowered(self, lowered: TaskRolloutSpec, *, phase: str) -> TaskRolloutSpec:
+    def configured_spec(self, spec: TaskRolloutSpec, *, phase: str) -> TaskRolloutSpec:
         """Apply deployment overrides without changing the task definition."""
-        if self.verifier.disable and not isinstance(lowered.task.grader, NoGrader):
+        if self.verifier.disable and not isinstance(spec.task.grader, NoGrader):
             raise ValueError("Disabled Harbor verification must be selected before task import")
 
         def machine(original: MachineRuntimeSpec | None) -> MachineRuntimeSpec | None:
@@ -149,28 +149,28 @@ class HarborTaskSettings:
             value *= self.timeout_multiplier
             return value if ceiling is None else min(value, ceiling)
 
-        limits = lowered.limits.model_copy(
+        limits = spec.limits.model_copy(
             update={
-                "max_turns": lowered.limits.max_turns if self.max_turns is None else self.max_turns,
+                "max_turns": spec.limits.max_turns if self.max_turns is None else self.max_turns,
                 "total_turn_timeout": timeout(
-                    lowered.limits.total_turn_timeout,
+                    spec.limits.total_turn_timeout,
                     self.eval_timeout if phase == "eval" else self.agent_timeout,
                     self.max_agent_timeout,
                 ),
                 "verifier_timeout": timeout(
-                    lowered.limits.verifier_timeout,
+                    spec.limits.verifier_timeout,
                     self.verifier.override_timeout_sec,
                     self.verifier.max_timeout_sec,
                 ),
-                "attempt_timeout": lowered.limits.attempt_timeout
+                "attempt_timeout": spec.limits.attempt_timeout
                 if self.attempt_timeout is None
                 else self.attempt_timeout,
             }
         )
-        return lowered.model_copy(
+        return spec.model_copy(
             update={
-                "task_machine": machine(lowered.task_machine),
-                "verifier_machine": machine(lowered.verifier_machine),
+                "task_machine": machine(spec.task_machine),
+                "verifier_machine": machine(spec.verifier_machine),
                 "limits": limits,
             }
         )

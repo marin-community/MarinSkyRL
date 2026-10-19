@@ -8,6 +8,7 @@ from typing import Any
 import pyarrow.parquet as pq
 from datasets import Dataset
 from skyrl_gym.source_task import session_parameters
+from skyrl_gym.rollout_specs import SHELLBOX_HARNESS
 from rolloutengine.models import TaskRolloutSpec
 from taskcompendium.models import NoGrader
 from transformers import PreTrainedTokenizerBase
@@ -103,7 +104,7 @@ class NemotronTaskDataset(SourceTaskDataset):
                 terminal_bench_data,
                 cache_dir=cache_dir,
                 grader_override=grader_override,
-                session={**environment_configs["session"], "task_session": "shellbox"},
+                session={**environment_configs["session"], "task_session": SHELLBOX_HARNESS},
             )
         )
         super().__init__(

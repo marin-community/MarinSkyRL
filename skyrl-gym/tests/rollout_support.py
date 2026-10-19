@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from rolloutengine.models import GradedRollout, TaskRolloutSpec
-from skyrl_gym.task_records import StepReward, fold_grades
+from skyrl_gym.task_records import FOLDED_GRADE_HARNESSES, StepReward, fold_grades
 from taskcompendium.models import NoGrader
 
 
@@ -20,7 +20,9 @@ def episode_result(result: GradedRollout, spec: TaskRolloutSpec):
                 metrics=step.transition.metrics,
             )
             steps.append(
-                SimpleNamespace(turn=step.turn, transition=transition, response_end=step.response_end, messages=step.messages)
+                SimpleNamespace(
+                    turn=step.turn, transition=transition, response_end=step.response_end, messages=step.messages
+                )
             )
     grade = result.grade
     if isinstance(spec.task.grader, NoGrader):
@@ -28,7 +30,7 @@ def episode_result(result: GradedRollout, spec: TaskRolloutSpec):
         if steps and steps[-1].transition.task_grade is not None:
             grade = steps[-1].transition.task_grade
         elif grades:
-            grade = fold_grades(grades) if spec.harness in {"nemotron_ultra", "openenv"} else grades[-1]
+            grade = fold_grades(grades) if spec.harness in FOLDED_GRADE_HARNESSES else grades[-1]
     return SimpleNamespace(
         task_id=spec.task.id,
         grade=grade,

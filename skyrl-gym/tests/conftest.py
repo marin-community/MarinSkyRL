@@ -24,7 +24,7 @@ from skyrl_gym.rollout_specs import rollout_spec
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import CommandSemantics, Source
 
-from skyrl_gym.task_factories import episode_harnesses, session_factories
+from skyrl_gym.task_factories import episode_factories, episode_harnesses
 from skyrl_gym.nemotron_tasks import NemotronTaskSession
 from rollout_support import episode_result
 
@@ -316,7 +316,7 @@ async def rollout_session(task_lowering):
                 Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
             )
             spec = task_lowering(task, name, max_turns=max_turns)
-            engine = RolloutEngine({"local": Factory()}, episode_harnesses(spec, session_factories()))
+            engine = RolloutEngine({"local": Factory()}, episode_harnesses(spec, episode_factories()))
             return episode_result(await engine.run_task(spec, model), spec)
 
         try:

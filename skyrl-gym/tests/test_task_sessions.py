@@ -11,7 +11,7 @@ from skyrl_gym.rollout_specs import rollout_spec
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 
-from skyrl_gym.task_factories import episode_harnesses, session_factories
+from skyrl_gym.task_factories import episode_factories, episode_harnesses
 from skyrl_gym.task_sessions import CodeTaskSession
 from skyrl_gym.closure_dataset import closure_tasks
 from rollout_support import episode_result
@@ -43,7 +43,7 @@ class ReplayModel:
 def engine(model):
     class Runner:
         async def run(self, spec):
-            worker = RolloutEngine({}, episode_harnesses(spec, session_factories()))
+            worker = RolloutEngine({}, episode_harnesses(spec, episode_factories()))
             return episode_result(await worker.run_task(spec, model), spec)
 
     return Runner()

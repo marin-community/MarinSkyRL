@@ -56,7 +56,7 @@ def test_explicit_null_eval_timeout_preserves_full_trial_deadlines(task_inputs):
         }
     )
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"eval_timeout_override_sec": None}}))
-    configured = settings.lowered(original, phase="eval")
+    configured = settings.configured_spec(original, phase="eval")
     assert configured.limits.total_turn_timeout is None
     assert configured.limits.attempt_timeout == 3000
     assert configured.limits.verifier_timeout == 600

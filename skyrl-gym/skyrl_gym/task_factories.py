@@ -99,7 +99,7 @@ class _NemotronHarness:
                 turn = await session.reply(transition.observations, token_ids=transition.token_ids)
 
 
-def session_factories(*, executor: Executor | None = None) -> dict[str, EpisodeFactory]:
+def episode_factories(*, executor: Executor | None = None) -> dict[str, EpisodeFactory]:
     """Return direct task episode constructors keyed by harness name."""
     answer_graders = {
         "aime": grade_aime,

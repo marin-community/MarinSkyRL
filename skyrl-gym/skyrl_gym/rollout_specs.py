@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from pydantic import BaseModel
 from rolloutengine.harness.shell import ShellHarness
 from rolloutengine.models import MachineRuntimeSpec, RolloutLimits, TaskRolloutSpec, TraceMode
 from taskcompendium.models import TaskSpec
@@ -11,6 +12,13 @@ from taskcompendium.runtime.shell import ShellToolConfig
 
 SHELLBOX_HARNESS = "shellbox"
 _SHELLBOX_PREFIX = SHELLBOX_HARNESS + ":"
+
+
+class ShellHarnessSettings(BaseModel):
+    """Per-task Shellbox settings serialized in the harness identifier."""
+
+    command_timeout: float | None
+    shell_tool: ShellToolConfig
 
 
 def rollout_spec(
@@ -27,8 +35,11 @@ def rollout_spec(
     command_timeout = settings.pop("command_timeout", None)
     trace = TraceMode(settings.pop("trace", TraceMode.EXACT_TOKENS))
     if harness == SHELLBOX_HARNESS:
-        shell_settings = {"command_timeout": command_timeout, "shell_tool": ShellToolConfig.model_validate(shell_tool).model_dump()}
-        harness += ":" + json.dumps(shell_settings, sort_keys=True, separators=(",", ":"))
+        shell_settings = ShellHarnessSettings(
+            command_timeout=command_timeout,
+            shell_tool=ShellToolConfig.model_validate(shell_tool),
+        )
+        harness += ":" + json.dumps(shell_settings.model_dump(), sort_keys=True, separators=(",", ":"))
     return TaskRolloutSpec(
         task=task,
         harness=harness,
@@ -43,10 +54,10 @@ def shell_harness(name: str) -> ShellHarness:
     """Restore the shell configuration encoded in a task's harness name."""
     if not name.startswith(_SHELLBOX_PREFIX):
         raise ValueError(f"Not a Shellbox harness: {name!r}")
-    settings = json.loads(name[len(_SHELLBOX_PREFIX) :])
+    settings = ShellHarnessSettings.model_validate_json(name[len(_SHELLBOX_PREFIX) :])
     return ShellHarness(
-        command_timeout=settings["command_timeout"],
-        shell_tool=ShellToolConfig.model_validate(settings["shell_tool"]),
+        command_timeout=settings.command_timeout,
+        shell_tool=settings.shell_tool,
     )
 
 

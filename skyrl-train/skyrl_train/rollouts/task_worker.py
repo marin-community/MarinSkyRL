@@ -41,7 +41,7 @@ from rolloutengine.engine import RolloutEngine
 from skyrl_gym.rollout_specs import is_shell_harness, shell_harness
 from skyrl_train.config.utils import generation_context_limit
 from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION
-from skyrl_gym.task_factories import EpisodeFactory, episode_harnesses, session_factories
+from skyrl_gym.task_factories import EpisodeFactory, episode_factories, episode_harnesses
 from skyrl_gym.task_records import fold_grades, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 
@@ -379,7 +379,7 @@ class TaskRolloutWorker:
             if max_verifier_workers > 0
             else None
         )
-        self.sessions = session_factories(executor=self.verifier_executor)
+        self.sessions = episode_factories(executor=self.verifier_executor)
         if sessions is not None:
             self.sessions.update(sessions)
         self.trajectory_sink: RetentionSink | None = None
@@ -432,7 +432,7 @@ class TaskRolloutWorker:
         harbor_settings = [self.harbor if "harbor" in item.task.tags else None for item in lowered_tasks]
         policies = [self.error_handling if harbor is None else harbor.error_handling for harbor in harbor_settings]
         lowered_tasks = [
-            item if harbor is None else harbor.lowered(item, phase=phase)
+            item if harbor is None else harbor.configured_spec(item, phase=phase)
             for item, harbor in zip(lowered_tasks, harbor_settings, strict=True)
         ]
         trajectory_ids = request.trajectory_ids

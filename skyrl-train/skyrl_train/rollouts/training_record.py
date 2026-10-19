@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rolloutengine.models import ConversationRecord, GradedRollout, ModelTurn, RolloutFailure, TaskRolloutSpec
-from skyrl_gym.task_records import StepReward, fold_grades
-from taskcompendium.grading_result import GradeResult, Outcome
+from skyrl_gym.task_records import FOLDED_GRADE_HARNESSES, StepReward, fold_grades
+from taskcompendium.grading_result import GradeResult
 from taskcompendium.models import NoGrader
 
 
@@ -81,7 +81,7 @@ def training_rollout(result: GradedRollout, spec: TaskRolloutSpec) -> TrainingRo
         if steps[-1].transition.task_grade is not None:
             grade = steps[-1].transition.task_grade
         elif grades:
-            grade = fold_grades(grades) if spec.harness in {"nemotron_ultra", "openenv"} else grades[-1]
+            grade = fold_grades(grades) if spec.harness in FOLDED_GRADE_HARNESSES else grades[-1]
     return TrainingRollout(
         task_id=spec.task.id,
         messages=() if conversation is None else conversation.messages,

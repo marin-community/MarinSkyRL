@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from collections.abc import Mapping
 
 from skyrl_gym.task_factories import EpisodeFactory
+from skyrl_gym.rollout_specs import SHELLBOX_HARNESS
 
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -427,7 +428,7 @@ class BasePPOExp:
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             cache_dir=Path(self.cfg.data.task_cache_dir),
-            session={**dict(self.cfg.environment.task_sessions.session), "task_session": "shellbox"},
+            session={**dict(self.cfg.environment.task_sessions.session), "task_session": SHELLBOX_HARNESS},
             grader_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
         )
 
