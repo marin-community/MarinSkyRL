@@ -5,6 +5,7 @@ from dataclasses import replace
 from taskcompendium.submission import conversation_messages
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import threading
@@ -29,13 +30,26 @@ from skyrl_train.trajectory_runners.model_clients import DirectModelClient, Mode
 from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
 from tests.cpu.task_specs import SHELL_ENVIRONMENT
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
+from cloud.iris.rl_config_translation import parse_rl_config
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("run_turns,task_turns,score", [(2, 1, 1.0), (1, 2, 0.0)])
-async def test_run_session_overrides_allow_tool_result_then_answer(task_inputs, run_turns, task_turns, score):
+async def test_run_session_overrides_allow_tool_result_then_answer(task_inputs, tmp_path, run_turns, task_turns, score):
     config, request = task_inputs
     config.max_turns = run_turns
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        json.dumps(
+            {
+                "context_budget": {"request_window_tokens": 110, "max_new_tokens_per_turn": 10, "max_turns": run_turns},
+                "environment": {
+                    "task_sessions": {"session": {"shell_tool": {"name": "run", "command_parameter": "command"}}}
+                },
+            }
+        )
+    )
+    parsed = parse_rl_config(str(recipe))
     original = request.rows[0].lowered
     task = original.task.model_copy(update={"environment_requirements": SHELL_ENVIRONMENT})
     lowered = lowered_task(task, backend="shellsim", max_turns=task_turns)
@@ -62,7 +76,7 @@ async def test_run_session_overrides_allow_tool_result_then_answer(task_inputs, 
         model,
         {"shellsim": ShellSimMachineFactory()},
         shutdown_timeout=30,
-        session_overrides={"max_turns": run_turns, "shell_tool": {"name": "run", "command_parameter": "command"}},
+        session_overrides=parsed.environment["task_sessions"]["overrides"],
     )
     try:
         (result,) = await worker.generate(request)

@@ -70,8 +70,9 @@ If several source images share a missing snapshot, the launcher fails: that mapp
 which shared base image was used. Rebuilding from one task's image would replace that shared base.
 
 The launch recipe's `context_budget.max_turns` overrides stored task turn limits. It is the only
-supported turn-limit setting in source recipes; declaring it again in session overrides fails validation. Other explicit
-`environment.task_sessions.overrides` fields override the corresponding `TaskSessionSpec` fields,
+supported turn-limit setting in source recipes; declaring it again in session overrides fails validation.
+Explicit `environment.task_sessions.session` fields override the corresponding `TaskSessionSpec` fields.
+`environment.task_sessions.overrides` can supply additional overrides and takes precedence over `session`,
 including on pre-lowered tasks. These settings are saved in the resolved launch config. Task fields
 that have no explicit run override remain unchanged; the stored dataset is not rewritten.
 
