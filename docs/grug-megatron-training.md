@@ -161,6 +161,13 @@ full-Hero measurements carry [#1000](https://github.com/marin-community/MarinSky
 equally in every arm. They measure learner scoring and updates; rollout and
 weight-transfer throughput require separate measurements.
 
+Automatic channel selection ran out of GPU memory on its second update in a
+paired 192-H100 Hero test at 65K. The eight-channel control completed eight
+updates, with warmed medians of 29.29 seconds per update and 11.18 seconds for
+scoring. Eight remains the tested starting point for this workload. See the
+[automatic-selection comparison](https://marin-us-east-02a.cwobject.com/marin/users/romain/hero-nccl-auto-01a13c0f/reports/HERO-NCCL-AUTOMATIC-SELECTION.md)
+for the channel counts, memory measurements and validation.
+
 On full trained Hero, one and eight channels produced identical scores and
 expert choices at each tested batch shape. Both settings changed scores when
 sequences shared a larger forward pass. This option preserves that observed
