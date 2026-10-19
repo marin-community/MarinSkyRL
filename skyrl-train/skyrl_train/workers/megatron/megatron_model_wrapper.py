@@ -13,10 +13,6 @@ from megatron.core.distributed import DistributedDataParallel as MegatronDDP
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.transformer.module import Float16Module
 
-from skyrl_train.config.numerics import NumericsMode
-from skyrl_train.models.grug_exact.context import ExactForward, check_engine_dp_ranks
-from skyrl_train.models.grug_exact.kernel_values import kernel_value
-from skyrl_train.models.grug_exact.vllm_kernels import token_logprobs
 from skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
@@ -125,11 +121,8 @@ class MegatronModelWrapper:
         policy_loss_fn: Optional[Callable] = None,
         logprob_chunk_size: Any = _UNSET,
         vocabulary_size: int | None = None,
-        numerics: NumericsMode = NumericsMode.NATIVE,
     ):
         self.cfg = config
-        # The model computes the decode-invariant engines' values (models/grug_exact).
-        self.exact = numerics is NumericsMode.EXACT
         self.vocabulary_size = vocabulary_size
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
@@ -188,34 +181,17 @@ class MegatronModelWrapper:
             )
 
         compact_sequences = compact_left_padded_tokens(sequences, attention_mask)
-
-        def trainer_logprobs() -> torch.Tensor:
-            return from_parallel_logits_to_logprobs(
-                logits,
-                compact_sequences,
-                vocab_start_index=tp_rank * logits.shape[-1],
-                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                tp_group=tp_group,
-                inference_only=not self.actor_module[0].training,
-                cp_group=None,
-                chunk_size=self._logprob_chunk_size,
-            )
-
-        if self.exact:
-            compact_logprobs = kernel_value(self._engine_logprobs(logits, compact_sequences), trainer_logprobs)
-        else:
-            compact_logprobs = trainer_logprobs()
+        compact_logprobs = from_parallel_logits_to_logprobs(
+            logits,
+            compact_sequences,
+            vocab_start_index=tp_rank * logits.shape[-1],
+            vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+            tp_group=tp_group,
+            inference_only=not self.actor_module[0].training,
+            cp_group=None,
+            chunk_size=self._logprob_chunk_size,
+        )
         return scatter_token_values(compact_logprobs, attention_mask, drop_last=True)
-
-    @staticmethod
-    def _engine_logprobs(logits: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        """``from_parallel_logits_to_logprobs`` on unsharded ``[batch, seq_len, vocab]`` logits, computed as the
-        engine's model runner computes it, without gradients."""
-        batch, seq_len, vocab = logits.shape
-        target = sequences.roll(shifts=-1, dims=-1)
-        with torch.no_grad():
-            values = token_logprobs(logits.reshape(batch * seq_len, vocab), target.reshape(-1))
-        return values.view(batch, seq_len)[:, :-1]
 
     def _token_entropies(self, logits: torch.Tensor, attention_mask: torch.Tensor, packed_seq_params) -> torch.Tensor:
         """Compute entropy before reconstructing only scalar token values."""
@@ -329,21 +305,16 @@ class MegatronModelWrapper:
         probe_row_indices: Optional[torch.Tensor] = None,
         num_actions: Optional[int] = None,
         record_recompute: bool = False,
-        rollout_engine_dp_ranks: Optional[torch.Tensor] = None,
-        loss_mask: Optional[torch.Tensor] = None,
+        **model_kwargs,
     ):
-        """Run the shared packed or left-unpadded Megatron model boundary.
+        """Run the shared packed or left-unpadded Megatron model boundary, passing ``model_kwargs`` to the model.
 
         When router replay is installed and routes are present, brackets the
         model call with ``begin_forward`` / ``end_forward`` (never falling back
         to native routing); with replay installed but no routes, fails fast
-        before the model runs. Under exact numerics the model call receives an
-        ``ExactForward`` with each sequence's engine data-parallel rank.
+        before the model runs.
         """
         attention_mask = attention_mask.to(bool)
-        model_kwargs = {}
-        if self.exact:
-            model_kwargs["exact"] = self._exact_forward(rollout_engine_dp_ranks, loss_mask)
         armed = False
         if self.router_replay is not None:
             if rollout_routed_experts is None:
@@ -404,19 +375,9 @@ class MegatronModelWrapper:
             raise
         return outputs, packed_seq_params
 
-    def _exact_forward(
-        self, rollout_engine_dp_ranks: Optional[torch.Tensor], loss_mask: Optional[torch.Tensor]
-    ) -> ExactForward:
-        """The ``ExactForward`` of one micro-batch, whose rows with loss tokens each need an engine data-parallel
-        rank."""
-        if rollout_engine_dp_ranks is None or loss_mask is None:
-            raise ValueError("exact numerics need each sequence's engine data-parallel rank and loss mask")
-        ranks = rollout_engine_dp_ranks.to(device=loss_mask.device, dtype=torch.long)
-        # A trajectory that failed before its model call is a row of placeholder tokens, no loss tokens and no
-        # engine rank; no loss reads its values.
-        scored = (loss_mask != 0).any(dim=1)
-        check_engine_dp_ranks(ranks, scored, int(self.cfg.generator.inference_engine_data_parallel_size))
-        return ExactForward(ranks, int(self.cfg.generator.inference_engine_expert_parallel_size))
+    def _model_kwargs(self, micro_batch: MegatronForwardMicroBatch | MegatronPolicyMicroBatch) -> dict[str, Any]:
+        """Keyword arguments the model call of ``micro_batch`` receives besides its tokens."""
+        return {}
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -467,8 +428,7 @@ class MegatronModelWrapper:
                 rollout_routed_experts=batch.rollout_routed_experts,
                 probe_row_indices=batch.probe_row_indices,
                 num_actions=batch.num_actions,
-                rollout_engine_dp_ranks=batch.rollout_engine_dp_ranks,
-                loss_mask=batch.loss_mask,
+                **self._model_kwargs(batch),
             )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
@@ -696,8 +656,7 @@ class MegatronModelWrapper:
                     rollout_routed_experts=batch.rollout_routed_experts,
                     num_actions=batch.num_actions,
                     record_recompute=True,
-                    rollout_engine_dp_ranks=batch.rollout_engine_dp_ranks,
-                    loss_mask=batch.loss_mask,
+                    **self._model_kwargs(batch),
                 )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)

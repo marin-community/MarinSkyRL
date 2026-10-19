@@ -36,6 +36,7 @@ from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.config.numerics import NumericsMode
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_exact.engine_regions import set_compile_rows
+from skyrl_train.models.grug_exact.model_wrapper import ExactMegatronModelWrapper
 from skyrl_train.models.grug_exact.support import resolve_exact_numerics
 from skyrl_train.models.grug_exact.vllm_kernels import require_hopper_gpu
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
@@ -507,7 +508,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         # create worker model
-        self.model = MegatronModelWrapper(
+        wrapper = ExactMegatronModelWrapper if self.numerics is NumericsMode.EXACT else MegatronModelWrapper
+        self.model = wrapper(
             config=self.cfg,
             vocabulary_size=self.strategy.hf_config.vocab_size,
             actor_module=self.actor_module,
@@ -516,7 +518,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
-            numerics=self.numerics,
         )
         self._maybe_install_router_replay("policy")
 
@@ -549,7 +550,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
-            numerics=self.numerics,
         )
 
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":

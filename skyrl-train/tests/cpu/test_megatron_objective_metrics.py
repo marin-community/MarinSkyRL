@@ -149,7 +149,6 @@ def _megatron_mini_batch_metrics(
     wrapper.actor_optimizer = None
     wrapper.policy_loss_fn = policy_loss_fn
     wrapper.use_sample_packing = False
-    wrapper.exact = False
     wrapper._logprob_chunk_size = None
 
     # Bypass the megatron-core machinery that needs a real TP/PP mesh; everything
