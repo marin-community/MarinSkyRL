@@ -26,7 +26,7 @@ from collections import defaultdict, deque
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.config.numerics import CheckFailure, read_numerics
+from skyrl_train.config.numerics import CheckFailure
 from skyrl_train.exactness_check import ExactnessCheck
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
@@ -384,21 +384,10 @@ class RayPPOTrainer:
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
-        numerics = read_numerics(cfg)
-        if numerics.fallback_reasons:
-            logger.warning(
-                "trainer.numerics.mode=exact resolved to native, so trainer and rollout log-probabilities will "
-                "differ: {}",
-                "; ".join(numerics.fallback_reasons),
-            )
         check = cfg.trainer.numerics.check
         if check.every_weight_syncs > 0:
             self._exactness_check = ExactnessCheck(
-                check.every_weight_syncs,
-                CheckFailure(check.on_failure),
-                numerics.mode,
-                cfg.generator.sampling_params,
-                tokenizer,
+                check.every_weight_syncs, CheckFailure(check.on_failure), cfg.generator.sampling_params, tokenizer
             )
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset

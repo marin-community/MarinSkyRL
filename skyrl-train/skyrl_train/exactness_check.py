@@ -19,7 +19,7 @@ from loguru import logger
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.config.numerics import CheckFailure, NumericsMode
+from skyrl_train.config.numerics import CheckFailure
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -53,13 +53,11 @@ class ExactnessCheck:
         self,
         every_weight_syncs: int,
         on_failure: CheckFailure,
-        mode: NumericsMode,
         sampling_params: DictConfig,
         tokenizer: PreTrainedTokenizerBase,
     ):
         self.every_weight_syncs = every_weight_syncs
         self.on_failure = on_failure
-        self.mode = mode
         self.tokenizer = tokenizer
         self.prompt_token_ids = tokenizer.encode(CHECK_TEXT, add_special_tokens=False)
         self.sampling_params = {
@@ -183,9 +181,5 @@ class ExactnessCheck:
             )
             if self.on_failure is CheckFailure.STOP:
                 raise RuntimeError(message)
-            # A mode that promises bit-identical results has a defect; the others measure their expected mismatch.
-            if self.mode.bit_identical:
-                logger.error(message)
-            else:
-                logger.info(message)
+            logger.warning(message)
         return metrics

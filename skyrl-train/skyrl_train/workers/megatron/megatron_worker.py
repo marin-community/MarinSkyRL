@@ -37,7 +37,6 @@ from skyrl_train.config.numerics import NumericsMode
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_exact.engine_regions import set_compile_rows
 from skyrl_train.models.grug_exact.model_wrapper import ExactMegatronModelWrapper
-from skyrl_train.models.grug_exact.support import resolve_exact_numerics
 from skyrl_train.models.grug_exact.vllm_kernels import require_hopper_gpu
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.timing_observability import PhaseBreakdown
@@ -124,13 +123,12 @@ class MegatronWorker:
         model_source_uri: str | None = None,
     ):
         """
-        Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer, and set
-        ``self.numerics`` to the mode the configured ``numerics`` resolves to for this model.
+        Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer, with ``numerics`` as
+        ``self.numerics``.
         """
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
-        # Resolved against the model config as written, before the overrides below, as the driver resolves it.
-        self.numerics = resolve_exact_numerics(hf_config).mode if numerics is NumericsMode.EXACT else numerics
+        self.numerics = numerics
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
             trust_remote_code=True,

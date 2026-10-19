@@ -7,7 +7,7 @@ import torch
 from megatron.core import parallel_state as mpu
 from ray.util.placement_group import placement_group
 
-from skyrl_train.config.numerics import NumericsMode, read_numerics
+from skyrl_train.config.numerics import NumericsMode
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.types import ROLLOUT_ENGINE_DP_RANKS_KEY
@@ -66,7 +66,6 @@ def _config(model_path: str, mode: NumericsMode):
     cfg.trainer.policy.optimizer_config.lr = 0.0
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
     validate_cfg(cfg)
-    assert read_numerics(cfg).mode is mode
     return cfg
 
 

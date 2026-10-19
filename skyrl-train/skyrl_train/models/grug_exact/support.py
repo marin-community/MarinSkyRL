@@ -3,7 +3,6 @@
 from omegaconf import DictConfig
 from transformers import PretrainedConfig
 
-from skyrl_train.config.numerics import NumericsMode, NumericsResolution
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, GrugMoeConfig
 
@@ -70,14 +69,6 @@ def exact_model_problems(model_config: PretrainedConfig) -> list[str]:
     if model_config.uses_hero_architecture:
         problems.append("the policy uses Hero layers, ShortConv or latent experts")
     return problems
-
-
-def resolve_exact_numerics(model_config: PretrainedConfig) -> NumericsResolution:
-    """``exact`` for a policy the exact trainer computes, otherwise ``native`` with the reasons."""
-    reasons = exact_model_problems(model_config)
-    if reasons:
-        return NumericsResolution(NumericsMode.NATIVE, tuple(reasons))
-    return NumericsResolution(NumericsMode.EXACT)
 
 
 def exact_trainer_problems(cfg: DictConfig) -> list[str]:

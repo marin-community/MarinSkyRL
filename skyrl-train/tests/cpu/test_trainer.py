@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 import skyrl_train.trainer as trainer_module
 from skyrl_train.callbacks.base import TrainerControl
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.config.numerics import CheckFailure, NumericsMode
+from skyrl_train.config.numerics import CheckFailure
 from skyrl_train.exactness_check import ExactnessCheck
 from marinskyrl.distillation import compile_distillation_plan_from_config
 from skyrl_train.distillation import ChosenTokenTeacherInput, TeacherTopKInput, TopKTeacherEvidence
@@ -1059,7 +1059,7 @@ async def test_exactness_check_scores_the_engines_after_qualifying_syncs_in_the_
     trainer._resolve_num_experts = lambda: None
     trainer.tokenizer = SimpleNamespace(pad_token_id=0, encode=lambda text, add_special_tokens: [1, 2, 3])
     trainer._exactness_check = ExactnessCheck(
-        2, CheckFailure.LOG, NumericsMode.NATIVE, trainer.cfg.generator.sampling_params, trainer.tokenizer
+        2, CheckFailure.LOG, trainer.cfg.generator.sampling_params, trainer.tokenizer
     )
     trainer.all_timings, trainer.all_startup_timings = {}, {}
     trainer.global_step = 0
@@ -1100,7 +1100,7 @@ async def test_exactness_check_scores_the_engines_after_qualifying_syncs_in_the_
 
     # A mode that promises bit-identical log-probabilities stops the run on that one bit under on_failure=stop.
     trainer._exactness_check = ExactnessCheck(
-        2, CheckFailure.STOP, NumericsMode.EXACT, trainer.cfg.generator.sampling_params, trainer.tokenizer
+        2, CheckFailure.STOP, trainer.cfg.generator.sampling_params, trainer.tokenizer
     )
     await trainer._sync_policy_for_rollouts(reason=WeightSyncReason.INITIAL)
     with pytest.raises(RuntimeError):

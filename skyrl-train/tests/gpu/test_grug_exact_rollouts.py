@@ -7,7 +7,7 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
-from skyrl_train.config.numerics import CheckFailure, NumericsMode, read_numerics
+from skyrl_train.config.numerics import CheckFailure
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.entrypoints.main_base import create_ray_wrapped_inference_engines_from_config
 from skyrl_train.exactness_check import ExactnessCheck
@@ -69,7 +69,6 @@ def _config(model_path: str, router_replay: bool):
     }
     cfg.generator.sampling_params.max_generate_length = RESPONSE_LENGTH
     validate_cfg(cfg)
-    assert read_numerics(cfg).mode is NumericsMode.EXACT
     return cfg
 
 
@@ -207,7 +206,6 @@ def test_exact_trainer_reproduces_decode_invariant_engine_logprobs_across_a_weig
         check = ExactnessCheck(
             cfg.trainer.numerics.check.every_weight_syncs,
             CheckFailure(cfg.trainer.numerics.check.on_failure),
-            NumericsMode.EXACT,
             cfg.generator.sampling_params,
             tokenizer,
         )
