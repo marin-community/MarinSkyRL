@@ -68,12 +68,13 @@ def test_missing_candidates_fail_closed():
         select_response_topk({2: -0.1}, 2)
 
 
-def test_chat_candidates_use_exact_token_ids_and_discard_extra_sampled_token():
+@pytest.mark.parametrize("candidate_bytes", [None, list(b"display metadata")])
+def test_chat_candidates_use_exact_token_ids_and_discard_extra_sampled_token(candidate_bytes):
     ids, scores = select_chat_response_topk(
         [
-            {"token": "token_id:9", "logprob": -7.0},
-            {"token": "token_id:3", "logprob": -0.2},
-            {"token": "token_id:2", "logprob": -0.1},
+            {"token": "token_id:9", "logprob": -7.0, "bytes": candidate_bytes},
+            {"token": "token_id:3", "logprob": -0.2, "bytes": candidate_bytes},
+            {"token": "token_id:2", "logprob": -0.1, "bytes": candidate_bytes},
         ],
         2,
     )

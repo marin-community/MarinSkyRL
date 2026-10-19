@@ -37,7 +37,11 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
 from skyrl_train.inference_engines.vllm.route_capture import response_routes
 from skyrl_train.io import io
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionLogProb,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+)
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest, CompletionResponse
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
@@ -147,7 +151,9 @@ def _create_async_engine_with_port_collision_retries(engine_args, stat_loggers):
 
 
 class SkyRLOpenAIServingChat(OpenAIServingChat):
-    """Substitute exact prompt token IDs while retaining vLLM's chat response parser."""
+    """Serve exact chat tokens and ID-only internal candidate heads."""
+
+    id_only_logprob_requests: set[str]
 
     async def render_chat_request(self, request):
         rendered = await super().render_chat_request(request)
@@ -165,11 +171,34 @@ class SkyRLOpenAIServingChat(OpenAIServingChat):
         raw_request: "_MinimalRequest",
         prompt_token_ids: list[int],
     ) -> ChatCompletionResponse | ErrorResponse | AsyncGenerator[str, None]:
+        id_only = (
+            request.logprobs
+            and request.top_logprobs is not None
+            and request.top_logprobs > 0
+            and request.return_tokens_as_token_ids
+            and request.n == 1
+        )
+        capture_id = f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}" if id_only else None
         token = _exact_chat_prompt_token_ids.set(prompt_token_ids)
         try:
+            if capture_id is not None:
+                self.id_only_logprob_requests.add(capture_id)
             return await super().create_chat_completion(request, raw_request)
         finally:
+            if capture_id is not None:
+                self.id_only_logprob_requests.discard(capture_id)
             _exact_chat_prompt_token_ids.reset(token)
+
+    def _get_top_logprobs(self, logprobs, top_logprobs, tokenizer, should_return_as_token_id, return_all=False):
+        if _exact_chat_prompt_token_ids.get() is None or not should_return_as_token_id:
+            return super()._get_top_logprobs(logprobs, top_logprobs, tokenizer, should_return_as_token_id, return_all)
+        # Internal captures consume exact IDs and scores. Token-ID placeholders
+        # already identify candidates; a byte array for each placeholder is unused.
+        return [
+            ChatCompletionLogProb(token=f"token_id:{token_id}", logprob=max(value.logprob, -9999.0), bytes=None)
+            for index, (token_id, value) in enumerate(logprobs.items())
+            if return_all or top_logprobs == -1 or (top_logprobs is not None and index < top_logprobs)
+        ]
 
 
 def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str, Any]:
@@ -1405,6 +1434,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         self._weight_loader = VLLMWeightLoader(self.llm)
         self._policy_steps = PolicyStepStamps()
         self._id_only_logprob_requests: set[str] = set()
+        self.openai_serving_chat.id_only_logprob_requests = self._id_only_logprob_requests
         self._stamp_engine_steps()
 
     def _stamp_engine_steps(self) -> None:
@@ -1418,7 +1448,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 state = output_processor.request_states.get(output.request_id)
                 if state is not None:
                     if state.external_req_id in self._id_only_logprob_requests:
-                        # Raw responses expose IDs and numeric scores only. The
+                        # ID-only captures expose IDs and numeric scores only. The
                         # separate response detokenizer still produces the text.
                         state.logprobs_processor.tokenizer = None
                     self._policy_steps.observe(state.external_req_id, len(output.new_token_ids), engine_core_timestamp)
