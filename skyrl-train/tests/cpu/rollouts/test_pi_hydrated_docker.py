@@ -56,7 +56,7 @@ async def test_pi_shared_worker_preserves_model_sampled_tokens_through_grade_and
         pytest.skip("Docker is required")
 
     @asynccontextmanager
-    async def local_endpoint(port):
+    async def local_endpoint(port, *, request_timeout):
         async def api_base(*, required_lifetime):
             return f"http://{socket.gethostbyname(socket.gethostname())}:{port}/v1"
 

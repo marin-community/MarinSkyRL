@@ -141,7 +141,7 @@ async def test_qwen_pi_tool_trajectory_reaches_worker_and_trainer(tmp_path, monk
     )
 
     @asynccontextmanager
-    async def local_endpoint(port):
+    async def local_endpoint(port, *, request_timeout):
         async def api_base(*, required_lifetime):
             return f"http://{socket.gethostbyname(socket.gethostname())}:{port}/v1"
 

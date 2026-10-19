@@ -225,7 +225,15 @@ count it as an evaluation. A separate disposable Daytona/CPU check under the
 same nominal limits completed one scripted 1,401-token student response with
 sampled logprobs and valid capture; it does not establish multi-turn GPU
 transport reliability. The matched step-0 GPU eval was **not** launched after
-this failure. Do not reuse the old 256-/512-token launch YAMLs or any spent
+this failure. Manual VM Docker runs now exercise the installed Pi agent through
+the shared worker with real CPU-sampled Qwen tokens, including a pretrained
+Qwen2.5-0.5B tool call, executed tool, separate verifier and ETL. Those
+opt-in tests use the SkyRL CPU engine with a vLLM-compatible HTTP bridge,
+**not** vLLM's CPU runtime or the CoreWeave/Daytona GPU path. Harbor's pinned
+producer now labels malformed evidence by fixed, content-free frame shape
+(missing separator, invalid header, empty or oversized fragment) to locate
+the transport fault on a fresh trial without retaining stdout or leaking task
+content; the earlier failed GPU attempt cannot be classified retroactively. Do not reuse the old 256-/512-token launch YAMLs or any spent
 attempt IDs/output prefixes; ensure fresh launch configs inherit the preset
 budget without a smaller ad-hoc override. The larger budget does not repair
 corrupt in-memory evidence, separate-verifier timeouts, or all-zero GRPO
