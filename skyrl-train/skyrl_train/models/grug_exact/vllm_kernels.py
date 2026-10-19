@@ -8,7 +8,8 @@ from collections.abc import Sequence
 
 import torch
 
-HOPPER_COMPUTE_CAPABILITY_MAJOR = 9
+from skyrl_train.inference_engines.vllm.decode_invariant.fa3 import FLASH_ATTN_VERSION, HOPPER_COMPUTE_CAPABILITY_MAJOR
+
 # ``expert_outputs`` addresses each expert's weights in units of this many elements from the lowest-addressed one, a
 # stride that Triton specializes as divisible by 16, as it does the stride of vLLM's own stacked expert weights.
 EXPERT_OFFSET_ELEMENTS = 16
@@ -102,7 +103,7 @@ def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | N
         softmax_scale=scale,
         causal=True,
         window_size=None if window is None else [window - 1, 0],
-        fa_version=3,
+        fa_version=FLASH_ATTN_VERSION,
         num_splits=1,
         out=out,
     )

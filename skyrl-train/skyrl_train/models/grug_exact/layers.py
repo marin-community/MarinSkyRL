@@ -16,7 +16,7 @@ from megatron.core.transformer.transformer_layer import TransformerLayer
 from skyrl_train.models.grug_exact import engine_regions as regions
 from skyrl_train.models.grug_exact.context import ExactForward, ResidualSum
 from skyrl_train.models.grug_exact.ep_combine import ep_combine
-from skyrl_train.models.grug_exact.kernel_values import kernel_value, residual_sum_value
+from skyrl_train.models.grug_exact.kernel_values import kernel_value
 from skyrl_train.models.grug_exact.reference_kernels import (
     gated_product_value,
     hybrid_input_norm_value,
@@ -294,5 +294,5 @@ class ExactTransformerLayer(TransformerLayer):
             context.attention[self.layer_number] = attention
         mlp = self.mlp(self.pre_mlp_layernorm(hidden_states), context, recompute=kept is not None)
         output, square_sum = regions.residual_square_sum(hidden_states, mlp)
-        output = residual_sum_value(output, hidden_states, mlp)
+        output = kernel_value(output, lambda: hidden_states + mlp)
         return output, square_sum, ResidualSum(hidden_states.detach(), mlp.detach())
