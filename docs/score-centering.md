@@ -60,13 +60,16 @@ bound parameter-gradient error or establish a learning benefit.
 
 ### Periodic probes with SC off
 
-`trainer.algorithm.score_centering_probe` controls three bounds: `interval` in learner policy steps,
+`trainer.algorithm.score_centering_probe` controls three bounds: `interval` in learner policy steps (10 by default),
 `topk` (128), and `tokens_per_response` (32). The first eligible prompt group is probed at startup, then
 at most one group is selected after each interval. Other groups keep chosen-token-only capture.
 The selected group captures its full response heads in vLLM; the task worker then exports at most 32
 evenly spaced valid positions per response. The trainer rescores those positions in its existing old-policy
 forward. It computes the hypothetical correction with the finalized training advantages and removes all
 probe head tensors before the optimizer. SC-off optimizer inputs and updates are unchanged.
+The 32-position bound limits export and rescoring. It does not limit vLLM's collection cost: every generated
+position in that group has a head, and one positive-head request can make vLLM compute top K for other requests
+in the same decode batch. Cadence estimates therefore use the measured complete probe cycle.
 
 Availability is logged at startup and reported as `score_centering_probe/available`. Probes require regular
 PPO, one tokenwise TIS truncation rule, local vLLM and unpacked Megatron with TP/CP/SP1. Distillation, FTPO,
@@ -120,59 +123,74 @@ Leaving this count zero avoids the new diagnostics. Ordinary telemetry does not 
 
 ## Snowball qualification and cost
 
-The [qualification record](https://github.com/marin-community/marin/tree/2f92446724b2207222f6f654c52ede00d9e48ac3/experiments/post_training/score_centering_readiness)
-contains configurations, every timing window, package versions, replay evidence and allocation accounting.
-The executed diagnostic runtime was `fe6c3a9300129af2126e8f81422f728f4d6eda52`, containing product candidate
-`2fb64c1c2b5e8692f996942704383be68a242587` and scaffolding excluded from this PR.
-It uses Torch 2.13.0+cu132, vLLM `39e62869693c`, Megatron Core 0.18.0 and Transformers 5.16.1;
-the recorded lock SHA-256 is `ab752fa67acb209e8ae5ca3ee77b66bc59db1cc1fc3df7a16bc43d6a37c3d86e`.
+The [qualification record](https://github.com/yonromai/marin/tree/af470a613fb0cc057c748d25ec681dd654821edb/experiments/post_training/score_centering_performance)
+contains submitted configurations, complete reports, profiling, independent replays and allocation accounting.
+The qualified product is `f6b6ccb1d763486af190da0ff7005ed169285cdc`, executed through diagnostic runtime
+`021666fc1b04d9e425321a6279ca19849b4da90f`; the control product/runtime are `325f819f` / `7aad2b37`.
+Benchmark scaffolding stays outside this PR. Both include main `32edb00f` and its DP transport changes, with
+frozen lock SHA-256 `a9686c1263fae6e77f560c22ab8faa99b694747ac57e09f816ae7ce923c19f99`.
 
 Snowball 67B/A2B SFT ran on four 8-H100 learner nodes and one 8-H100 inference node in `cw-us-east-02a`.
-Learner geometry was PP2/EP8/DP16 with TP/CP/SP1. There were 128 responses from 32 prompt groups,
-prompt lengths 108–453 and response lengths 64/256/1024/4096, including padding, mask holes and an empty-loss row.
-Independent checks at 381 actual token positions per temperature (1.0 and 0.7) had chosen/head normalizer
-errors below 2e-6. Correct-prefix vLLM replay agreed substantially better than a one-token-shift control.
-At matching weights, chosen-token absolute TIM had mean 0.03853, p99 0.35906 and maximum 3.37347;
-head-entry absolute TIM had mean 0.16161 and maximum 11.18716. These are measured engine differences.
+Learner geometry is PP2/EP8/DP16 and TP/CP/SP1; inference uses DP8/EP8. The control completed 21 applied
+updates and the candidate 39. Each mode has one profiled warmup and five measured windows in rotating order,
+with 128 responses from 32 groups, lengths 64/256/1024/4096, padding, mask holes and an empty-loss row.
+Each window contains 174080 response tokens and 164484 loss tokens in a 128×4549 sequence tensor.
+Cycles include native task/admission/storage, old scoring, optimizer work, normal metrics and verified sync.
 
-Sixteen controlled optimizer updates and a sampled diagnostic update preceded a native task/admission/GRPO
-update. The native step admitted 128 trajectories, consumed tokens with maximum age zero, applied one update
-and skipped none. Its sampled current/behavior retained mass was 0.995352/0.995688 and mean absolute scalar
-SC loss was 0.001632. Its PPO current/old log ratio was zero while sampled current/behavior absolute log ratio
-was 0.06311. Neither mass nor scalar loss establishes parameter-gradient accuracy or learning benefit.
-
-The diagnostic writer failed after those checks on an unused UID field. Saved timing windows and durable
-native worker logs support the results; the job's terminal state is failed. Reaching that report line proves
-the prior nonzero trainer-drift and frozen-sampler replay assertions passed. Their numerical summaries were
-not retained. The evidence separates observations from this control-flow inference and lists missing fields.
-The writer repair passed a CPU regression and changes no product code.
-
-Each mode had one warmup and three measured windows in rotating order, with 174080 response tokens,
-168386 loss tokens and a 128×4549 sequence tensor per window. Prompt, length, mask and shape workloads match;
-generated token content varies. Generation and training run serially with frozen sampler weights and
-sequential learner updates. This measures a controlled workload rather than production asynchronous throughput.
-
-| TIS mode | Cycle seconds | Response tokens/s | Old forward / update seconds | Learner peak allocated / sampled device GiB |
+| TIS mode | Control cycle s | Candidate cycle s | Candidate response tokens/s | Learner peak allocated GiB |
 | --- | ---: | ---: | ---: | ---: |
-| No head, existing trainer telemetry off | 61.97 | 2809 | 0.96 / 6.45 | 54.66 / 79.29 |
-| No head, existing trainer telemetry on | 61.27 | 2841 | 0.98 / 6.19 | 54.66 / 78.27 |
-| K128 capture/rescore, SC off | 74.86 | 2326 | 3.26 / 10.08 | 54.73 / 78.34 |
-| K128 capture/rescore, SC on | 74.33 | 2342 | 3.17 / 9.96 | 55.70 / 79.27 |
+| Ordinary, probes off | 58.553 | 58.237 | 2989 | 54.558 |
+| K128 capture/rescore, SC off | 111.818 | 84.434 | 2062 | 54.611 |
+| K128 capture/rescore, SC on | 109.780 | 84.734 | 2054 | 55.535 |
+| Probes armed, no observation due | — | 58.033 | 3000 | 54.560 |
+| Complete probe cycle | — | 63.645 | 2735 | 54.559 |
 
-Full SC adoption costs +21.29% cycle time against ordinary TIS with existing telemetry, with a descriptive
-95% paired interval of +15.77% to +27.07%. Against matched capture, the estimate is −0.72% (−5.62% to +4.44%);
-this does not establish a speedup or zero-cost correction. Existing trainer telemetry on/off is −1.13%
-(−3.35% to +1.14%), so the 1% target is unproven. New sampled diagnostics remain opt-in; no steady-state
-overhead claim is made for them. Existing worker PPO/TIS metrics remain on in every mode.
+SC cycles fell 22.81% between allocations (descriptive Welch 95% interval 21.06–24.52% reduction).
+Full adoption still costs 45.50% against ordinary TIS (paired 95% interval 43.38–47.63%), compared with
+87.49% in the same-base control. Capture alone costs 44.98%; SC versus matched capture is 0.36%
+(−0.29–1.01%). This does not establish zero correction cost. The remaining cost is mainly native head
+collection and chat response construction/transport, followed by continuous head scoring.
 
-Intervals use paired log ratios across three repetitions with Student-t assumptions. One allocation, persistent
-caches and changing learner weights limit the inference; variation between allocations was not measured.
-The measured candidate precedes main's [DP-chunk sharing optimization](https://github.com/marin-community/MarinSkyRL/pull/999).
-Peak reserved learner memory was 62.38/61.37/61.44/62.50 GiB in table order. Inference peaks were
-57.57 GiB allocated, 58.87 GiB reserved and 64.40 GiB sampled device memory in every mode. Device peaks
-were sampled every 0.1 seconds and can miss shorter spikes; allocator caches persist across modes.
+The implementation skips head-text decoding and unused display bytes for private exact-token captures,
+preserves raw numeric arrays and safe int32 IDs, and reduces parsing/collation work. Response detokenization,
+public responses, probabilities, source stamps and the full-vocabulary normalizer are preserved. Native
+profiles confirm head-token decoding is removed; alternative object constructors showed no useful benefit.
+A compact native transport would require a larger design and further qualification. K32 remains an optional
+approximation without a Snowball learning or parameter-gradient justification here.
 
-Initial weight sync completed 541.5 seconds after admission, including 9.16 seconds in that sync call.
-Setup was measured once for the shared allocation. Every owned allocation, including failed starts and
-setup/idle/teardown, is accounted for: 25.186 controller-runtime H100-hours, with a conservative provider
-allocation upper bound of 27.474 H100-hours. All six jobs and 15 attempts are terminal; owned pods are absent.
+A complete long-response probe adds 5.612 s over the armed path (95% mean interval 4.493–6.732 s), including
+all four 4096-token response heads and 96 valid sampled positions after masking. The default interval of ten
+models 0.61% average overhead versus off (−0.17–1.40%), about 0.96% incremental cost over the armed path.
+It does not prove overhead below 1%. Observations would be 585.94 s apart in this serialized workload,
+starting immediately. Per-probe coverage is 0.0584% of loss tokens, or about 0.00584% across ten equal cycles.
+Ordinary and armed optimizer tensor byte counts match the probe cycle. Due/non-due paths were measured
+separately; the post-qualification default change from 100 to 10 changes cadence only.
+
+Six further updates used normal rewards, masks and finalized GRPO advantages at interval two. Three probes
+each observed 128 fresh-source positions, with no stale or unknown tags. Actual absolute scalar corrections
+were 0, 0.000460 and 0; the unit-advantage values were 0.001209, 0.000798 and 0.001678. The two zeros came
+from zero advantages. Current retained mass ranged 0.97484–0.99285, while fresh chosen-token mismatch means
+were 0.0417–0.0612 and PPO current/old log ratios stayed zero. These are distinct signals, not learning gains.
+Independent NumPy FP64 replay matches the nonzero actual correction to 1.12e-7; unit-advantage differences
+reach 1.98e-6 near the FP32 tail floor. Counts, coverage, zero-advantage and tail-floor metrics limit interpretation.
+
+The pinned Qwen startup check passed exact native chat tokens, message, source-version and chosen/head-score
+A/B checks at temperatures 1.0 and 0.7, with actual decoder suppression. Snowball checked 381 actual causal
+positions per temperature against a full-vocabulary reference, with maximum head error below 2e-6, and checked
+compact native positions at 0.7. All native updates applied once, skipped none, and consumed stamped source
+age zero. The earlier diagnostic native 0.7 warmup had an engine override error and is excluded; the final
+candidate records effective engine temperatures. Its control's measured 1.0 windows are unchanged.
+
+Inference peaks reached 58.309 GiB allocated, 58.877 GiB reserved and 64.406 GiB sampled device memory.
+Memory sampling every 0.1 seconds and persistent allocator caches limit incremental comparisons. Admission to
+initial sync took 638.4/575.0 s for control/candidate, including 9.621/9.171 s in the sync calls. This follow-up
+accounts for 98.360 H100-hours from recorded admission or earlier Qwen controller-start proxies, with a
+110.275 H100-hour conservative provider upper bound. Failed starts, setup, idle time and teardown are included.
+All eight follow-up jobs are terminal with zero retries; owned pods are absent on both H100 clusters.
+
+These are serialized native cycles, not production asynchronous throughput. Five repetitions and one allocation
+per implementation give descriptive intervals; changing weights, caches and placement variation limit inference.
+Admission rejection, response lengths and mixed decode batches can change average probe cost and cadence.
+The [older readiness benchmark](https://github.com/marin-community/marin/tree/2f92446724b2207222f6f654c52ede00d9e48ac3/experiments/post_training/score_centering_readiness)
+used a different raw/cohort loop before main's transport changes; its 21.3% result is historical context.
+No parameter-gradient accuracy or learning benefit is established.
