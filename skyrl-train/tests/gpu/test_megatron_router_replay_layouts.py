@@ -54,6 +54,8 @@ from tests.gpu.test_grug_megatron import (
 )
 from tests.gpu.utils import get_available_gpus, init_worker_with_type
 
+NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
+NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
 TOPK = 2
 LOGPROB_MAX_ABS_TOLERANCE = 2e-1
 LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
@@ -89,11 +91,11 @@ def _routed_batch(pad_token_id: int, *, captured: bool, variable_lengths: bool =
         variable_lengths=variable_lengths,
     )
     generator = torch.Generator().manual_seed(31)
-    shape = (batch["sequences"].shape[0], batch.metadata["response_length"], TOY_SHAPE["num_hidden_layers"], TOPK)
+    shape = (batch["sequences"].shape[0], batch.metadata["response_length"], NUM_LAYERS, TOPK)
     if not captured:
         routes = torch.zeros(shape, dtype=torch.long)  # empty capture: everything routes natively
     else:
-        routes = random_unique_routes(shape, TOY_SHAPE["num_local_experts"], generator=generator)
+        routes = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
         routes[1] = 0  # one sample with fully-lost capture routes natively
     batch["rollout_routed_experts"] = routes.to(torch.int32)
     return batch
@@ -117,7 +119,7 @@ def test_all_placeholder_replay_matches_flag_off_at_same_weights(tmp_path, packi
     empty.routed_expert_rows = RoutedExpertRows(
         tuple(row[: int(mask.sum())].numpy() for row, mask in zip(dense_routes, empty["response_mask"], strict=True)),
         empty.metadata["response_length"],
-    )
+        )
     without_routes = empty.select(["sequences", "attention_mask"], ["response_length"])
     scores = []
     for cfg, batch in ((cfg_off, without_routes), (cfg_on, empty)):
@@ -195,7 +197,7 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
     batch.routed_expert_rows = RoutedExpertRows(
         tuple(row[: int(mask.sum())].numpy() for row, mask in zip(dense_routes, batch["response_mask"], strict=True)),
         width,
-    )
+        )
     batch.metadata["uids"] = [row.prompt_id for row in probes]
     initialize_ray(cfg)
     try:

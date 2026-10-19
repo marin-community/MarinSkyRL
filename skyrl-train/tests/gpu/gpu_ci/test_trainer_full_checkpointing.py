@@ -164,8 +164,12 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         print("Phase 1: Initial training and checkpoint save")
 
         trainer1 = create_minimal_trainer(cfg)
-        workers = tuple(import_worker(strategy, role) for role in ("policy", "critic", "ref"))
-        trainer1.build_models(*workers)
+        PolicyWorker = import_worker(strategy, "policy")
+        CriticWorker = import_worker(strategy, "critic")
+        RefWorker = import_worker(strategy, "ref")
+
+        # Build models
+        trainer1.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         if strategy == "megatron":
             # A real optimizer step initializes Adam moments, which the checkpoint must preserve.
@@ -231,7 +235,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         cfg_resume.trainer.ckpt_path = cfg.trainer.ckpt_path
 
         trainer2 = create_minimal_trainer(cfg_resume)
-        trainer2.build_models(*workers)
+        trainer2.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         # Load checkpoints
         loaded_global_step, loaded_checkpoint_dir = trainer2.load_checkpoints()

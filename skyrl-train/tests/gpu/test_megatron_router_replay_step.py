@@ -36,6 +36,8 @@ from tests.gpu.test_grug_megatron import (
 )
 from tests.gpu.utils import init_worker_with_type
 
+NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
+NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
 TOPK = 4
 NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
 NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
@@ -60,21 +62,19 @@ def _replay_config(tmp_path, *, packing: bool):
 def _routed_batch(pad_token_id: int, *, routes: str = "random", seed: int = 29) -> TrainingInputBatch:
     batch = _padded_batch(pad_token_id)
     generator = torch.Generator().manual_seed(seed)
-    shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, TOY_SHAPE["num_hidden_layers"], TOPK)
+    shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, NUM_LAYERS, TOPK)
 
     if routes == "random":
-        rollout_routed_experts = random_unique_routes(shape, TOY_SHAPE["num_local_experts"], generator=generator)
+        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
         rollout_routed_experts[1] = 0  # one sample with fully-lost capture routes natively
     elif routes == "sentinel":
         rollout_routed_experts = torch.zeros(shape, dtype=torch.long)
     elif routes == "wrong_layers":
         rollout_routed_experts = random_unique_routes(
-            (*shape[:2], TOY_SHAPE["num_hidden_layers"] - 1, TOPK), TOY_SHAPE["num_local_experts"], generator=generator
+            (*shape[:2], NUM_LAYERS - 1, TOPK), NUM_EXPERTS, generator=generator
         )
     elif routes == "wrong_response":
-        rollout_routed_experts = random_unique_routes(shape, TOY_SHAPE["num_local_experts"], generator=generator)[
-            :, :-1
-        ]
+        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)[:, :-1]
     else:
         raise ValueError(routes)
     batch["rollout_routed_experts"] = rollout_routed_experts.to(torch.int32)

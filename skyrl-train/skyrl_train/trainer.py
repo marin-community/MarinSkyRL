@@ -567,6 +567,10 @@ class RayPPOTrainer:
         except Exception as e:
             logger.warning(f"{label} error (non-fatal): {e}")
 
+    def cleanup_ray_actors(self):
+        """Public alias for :meth:`_kill_ray_actors` (used by entrypoints)."""
+        return self._kill_ray_actors()
+
     def _kill_ray_actors(self):
         """Kill all managed Ray actors (models + inference engines).
 
