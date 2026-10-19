@@ -1,6 +1,7 @@
 """Run Harbor installed agents against engine-owned completions and machines."""
 
 import asyncio
+import json
 import math
 import shlex
 from collections.abc import Awaitable, Callable
@@ -13,6 +14,7 @@ from rolloutengine.contracts import ModelTurn, SessionStart
 
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
 from skyrl_train.rollouts.agent_environment import BorrowedMachineEnvironment
+from skyrl_train.rollouts.agent_trace import recorded_completion
 
 
 _SANDBOX_DIAGNOSTIC_SCHEMA: dict[tuple[str, str], dict[str, type | tuple[type, ...]]] = {
@@ -113,26 +115,18 @@ async def run_installed_agent(
     context = AgentContext()
     # Container-owned logs must not overwrite model evidence during download.
     trace_path = evidence_dir / "turns.jsonl"
-    request_index = 0
 
-    async def recorded_complete(request: SessionStart) -> ModelTurn:
-        nonlocal request_index
-        index = request_index
-        request_index += 1
+    async def observed_complete(request: SessionStart) -> ModelTurn:
         environment.record_diagnostic("model_request:start")
-        with trace_path.open("a") as trace:
-            trace.write(json.dumps({"schema_version": 1, "index": index, "request": asdict(request)}) + "\n")
         try:
             turn = await complete(request)
         except BaseException as error:
             environment.record_diagnostic("model_request:failed", error=error)
             raise
         environment.record_diagnostic("model_request:completed")
-        with trace_path.open("a") as trace:
-            trace.write(json.dumps({"schema_version": 1, "index": index, "turn": asdict(turn)}) + "\n")
         return turn
 
-    with backend.session(trial_id, recorded_complete):
+    with backend.session(trial_id, recorded_completion(observed_complete, trace_path)):
         environment.record_diagnostic("agent:prepare_logs")
         prepared = await environment.exec(
             f"mkdir -p {shlex.quote(str(agent.environment_logs_dir))}",

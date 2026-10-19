@@ -73,7 +73,7 @@ class InstalledAgentSettings(BaseModel):
                 raise ValueError("Pi teacher binding cannot be used for student-only execution")
             return self
         if pi.mode != "teacher_trace" or self.teacher is None:
-            raise ValueError("Pi teacher modes need bound teacher routing and hydrated evidence")
+            raise ValueError("Pi teacher modes require per-trial teacher routing and hydrated evidence")
         if self.agent.model_name != f"hosted_vllm/{self.teacher.model}":
             raise ValueError("Pi teacher trace must address the bound independent teacher model")
         return self
@@ -124,7 +124,7 @@ class InstalledAgentRuntime:
         max_output_tokens: int,
         *,
         owned_teacher_transport: Any | None = None,
-        endpoint_factory: Callable[[int], AbstractAsyncContextManager[Any]] = registered_agent_endpoint,
+        endpoint_factory: Callable[..., AbstractAsyncContextManager[Any]] | None = None,
     ):
         self.settings = settings
         if settings.teacher is not None and (
@@ -137,7 +137,7 @@ class InstalledAgentRuntime:
                 "Pi teacher backend source, model or revision differs from the independent teacher binding"
             )
         self.backend = backend
-        self.endpoint_factory = endpoint_factory
+        self.endpoint_factory = registered_agent_endpoint if endpoint_factory is None else endpoint_factory
         self.limits = NativeAPILimits(backend.model_name, backend.max_model_len, max_output_tokens)
         self.resources = AsyncExitStack()
         if owned_teacher_transport is not None:
@@ -380,7 +380,7 @@ class InstalledAgentRuntime:
                 startup_timeout=self.settings.service_startup_timeout,
                 shutdown_timeout=self.settings.service_shutdown_timeout,
             ) as port,
-            self.endpoint_factory(port) as endpoint,
+            self.endpoint_factory(port, request_timeout=run_timeout) as endpoint,
         ):
             api_base = await endpoint.api_base(required_lifetime=capability_lifetime)
             source = self.settings.agent if agent is None else agent
