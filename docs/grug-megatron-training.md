@@ -41,7 +41,8 @@ inputs in pinned CPU memory:
 +trainer.policy.megatron_config.transformer_config_kwargs.grug_checkpoint_cpu_offload=true
 ```
 
-This opt-in uses PyTorch's `save_on_cpu` on non-final decoder stages. Backward
+This opt-in uses PyTorch's `save_on_cpu` on non-final model stages. It includes
+the embedding stage's saved inputs as well as decoder checkpoints. Backward
 restores each input to its original device before recomputation. Scoring and
 the final pipeline stage keep their normal storage policy. It trades host
 memory and device-to-host/host-to-device copies for GPU headroom; update time
