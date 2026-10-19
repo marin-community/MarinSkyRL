@@ -5,13 +5,9 @@ import ray
 from transformers import AutoTokenizer
 
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.main_base import create_ray_wrapped_inference_engines_from_config
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.inference_engines.configuration import (
-    InferenceEngineRoleConfig,
-    inference_engine_kwargs_from_config,
-)
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_exact_checkpoint import write_snowball_checkpoint
@@ -32,25 +28,10 @@ SHARED_PREFIX_PROMPT = LONG_PROMPT[:256] + [7, 11, 13] * 30
 LATER_PROMPTS = [list(range(1, 20)), [1, 23]]
 
 
-def _client(cfg, model_path: str, decode_invariant: bool) -> InferenceEngineClient:
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    role = InferenceEngineRoleConfig(
-        pretrain=model_path,
-        backend="vllm",
-        num_inference_engines=1,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=1,
-        data_parallel_size=1,
-        expert_parallel_size=1,
-        decode_context_parallel_size=1,
-        shared_pg=None,
-        inference_engine_enable_sleep=False,
-        decode_invariant=decode_invariant,
-    )
-    engine_kwargs = inference_engine_kwargs_from_config(
-        cfg, tokenizer, role, engine_init_kwargs={"max_model_len": MAX_MODEL_LEN, "moe_backend": "triton"}
-    )
-    return InferenceEngineClient(create_ray_wrapped_inference_engines(**engine_kwargs), tokenizer, cfg)
+def _client(cfg) -> InferenceEngineClient:
+    tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
+    engines = create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=tokenizer)
+    return InferenceEngineClient(engines, tokenizer, cfg)
 
 
 async def _generate(client: InferenceEngineClient, cfg, prompts: list[list[int]], **settings) -> dict:
@@ -89,7 +70,12 @@ def test_decode_invariant_engine_gives_a_response_the_same_log_probabilities_in_
     write_snowball_checkpoint(model_path, num_hidden_layers=4, num_local_experts=8, vocab_size=VOCAB_SIZE)
     cfg = get_default_config()
     cfg.trainer.seed = 23
+    cfg.trainer.policy.model.path = str(model_path)
+    cfg.trainer.numerics.mode = "exact" if decode_invariant else "native"
+    cfg.trainer.placement.colocate_all = False
     cfg.generator.backend = "vllm"
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN, "moe_backend": "triton"}
     cfg.generator.model_dtype = "bfloat16"
     cfg.generator.enforce_eager = False
     cfg.generator.vllm_attention_backend = "FLASH_ATTN"
@@ -100,7 +86,7 @@ def test_decode_invariant_engine_gives_a_response_the_same_log_probabilities_in_
     cfg.generator.gpu_memory_utilization = 0.3
     initialize_ray(cfg)
     try:
-        client = _client(cfg, str(model_path), decode_invariant)
+        client = _client(cfg)
 
         alone = asyncio.run(_generate(client, cfg, [LONG_PROMPT]))
         response, logprobs = alone["response_ids"][0], alone["response_logprobs"][0]
