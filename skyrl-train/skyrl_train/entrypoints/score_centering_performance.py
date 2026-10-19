@@ -631,6 +631,7 @@ class PerformanceTrainer(RayPPOTrainer):
         self.probe["asynchronous_windows"] = []
         self.probe["asynchronous_controls"] = {
             "steps_per_mode": int(spec.async_steps),
+            "probe_steps": int(spec.async_probe_steps),
             "warmup_steps": int(spec.async_warmup_steps),
             "max_staleness_steps": buffer.max_staleness_steps,
             "batch_policy": buffer.batch_policy,
@@ -657,8 +658,9 @@ class PerformanceTrainer(RayPPOTrainer):
             started = time.perf_counter()
             measured_started = None
             windows = []
+            steps = int(spec.async_probe_steps if name == "probes" else spec.async_steps)
             async with asyncio.timeout(int(spec.async_phase_timeout_seconds)):
-                for index in range(int(spec.async_steps)):
+                for index in range(steps):
                     if index == int(spec.async_warmup_steps):
                         measured_started = time.perf_counter()
                     result = await self.native_window(f"async/{name}/{index}", asynchronous=True)
