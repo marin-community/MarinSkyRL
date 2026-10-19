@@ -48,6 +48,7 @@ trainer:
     arm_order: ABBA
     verify_steps: []
     mutate_normalizer: false
+    drop_one_group: false
     allow_unresolved_exactness: false
     measure_call_overhead: false
   evaluation_runner: training # task or harbor selects generated validation for offline preference training

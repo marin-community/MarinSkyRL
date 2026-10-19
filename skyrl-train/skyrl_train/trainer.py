@@ -1396,6 +1396,7 @@ class RayPPOTrainer:
                         "exactness": "exactness unresolved"
                         if self.cfg.trainer.gradient_streaming.allow_unresolved_exactness
                         else "gate required",
+                        "reward_mean": self.all_metrics["reward/avg_raw_reward"],
                         "arrivals": arrivals,
                         "last_arrival": arrivals[-1]["time"] if arrivals else None,
                         "exposed_learner": step_timer.duration
@@ -1587,15 +1588,31 @@ class RayPPOTrainer:
         pending = []
         consumed = set()
         chunk_groups = self.cfg.trainer.gradient_streaming.chunk_groups
+        dropped_group = None
 
         async def accumulate(groups):
+            nonlocal dropped_group
             uids = {group.uid for group in groups}
             assert len(uids) == len(groups) and not (consumed & uids), "Duplicated streamed group"
             consumed.update(uids)
             data = await asyncio.to_thread(
                 self.convert_rollout_groups_to_training_input, groups, expected_group_count=len(groups)
             )
+            row_uids = data.metadata["uids"]
             data = await self._prepare_policy_training_input(data)
+            if self.cfg.trainer.gradient_streaming.drop_one_group and dropped_group is None:
+                for uid in dict.fromkeys(row_uids):
+                    rows = torch.tensor([value == uid for value in row_uids], dtype=torch.bool)
+                    if not data["advantages"][rows].any():
+                        continue
+                    dropped_group = uid
+                    data["advantages"][rows] = 0
+                    data.metadata["probe_dropped_group"] = {
+                        "uid": uid,
+                        "rows": int(rows.sum().item()),
+                        "loss_tokens": int(data["loss_mask"][rows].sum().item()),
+                    }
+                    break
             data.metadata["global_step"] = self.global_step
             with Timer("train_critic_and_policy", self.all_timings), Timer("policy_train", self.all_timings):
                 await self._probe_actor_call("mesh", "ppo_accumulate", data)
@@ -1612,6 +1629,8 @@ class RayPPOTrainer:
             if pending:
                 await accumulate(pending)
         assert len(consumed) == self.context.config.batch_size, "Missing streamed group"
+        if self.cfg.trainer.gradient_streaming.drop_one_group:
+            assert dropped_group is not None, "Mutation requires a group with a nonzero gradient contribution"
 
     async def _train_step(self, epoch: int, step_wall: StepWallTime) -> TrainingInputBatch:
         """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""
@@ -1691,17 +1710,43 @@ class RayPPOTrainer:
                 reference = await self._prepare_policy_training_input(training_input)
                 reference.metadata["global_step"] = self.global_step
                 reference.metadata["probe_reference"] = "batch"
+                reference.metadata["probe_reward_mean"] = self.all_metrics["reward/avg_raw_reward"]
+                reference.metadata["probe_mean_response_tokens"] = sum(
+                    row["tokens"] for row in self._thundersync_arrivals
+                ) / sum(row["samples"] for row in self._thundersync_arrivals)
                 await self._probe_actor_call("mesh", "ppo_reference", reference)
-                generator = torch.Generator().manual_seed(int(self.cfg.trainer.seed) + self.global_step)
-                order = torch.randperm(len(reference), generator=generator)
-                perturbed = TrainingInputBatch(
-                    {key: value[order] if value is not None else None for key, value in reference.items()}
-                )
-                perturbed.metadata = dict(reference.metadata)
-                perturbed.metadata["probe_reference"] = "perturbed"
-                for key in ("sequences", "attention_mask"):
-                    perturbed[key] = torch.nn.functional.pad(perturbed[key], (1, 0))
-                statuses = await self._probe_actor_call("mesh", "ppo_reference", perturbed)
+                layouts = []
+                try:
+                    for index in range(2):
+                        seed = int(self.cfg.trainer.seed) + self.global_step * 104729 + index * 1000003
+                        generator = torch.Generator().manual_seed(seed)
+                        order = torch.randperm(len(reference), generator=generator)
+                        padding = int(torch.randint(1, 4, (), generator=generator).item()) + 3 * index
+                        layouts.append({"seed": seed, "left_padding": padding})
+                        perturbed = TrainingInputBatch(
+                            {key: value[order] if value is not None else None for key, value in reference.items()}
+                        )
+                        perturbed.metadata = dict(reference.metadata)
+                        perturbed.metadata["probe_reference"] = f"perturbed{index + 1}"
+                        perturbed.metadata["probe_layouts"] = list(layouts)
+                        for key in ("sequences", "attention_mask"):
+                            perturbed[key] = torch.nn.functional.pad(perturbed[key], (padding, 0))
+                        statuses = await self._probe_actor_call("mesh", "ppo_reference", perturbed)
+                except Exception:
+                    logger.error(
+                        "thundersync_probe_failed_step {}",
+                        json.dumps(
+                            {
+                                "step": self.global_step,
+                                "arm": self._thundersync_arm,
+                                "partial_seconds": time.perf_counter() - probe_started,
+                                "reward_mean": reference.metadata["probe_reward_mean"],
+                                "mean_response_tokens": reference.metadata["probe_mean_response_tokens"],
+                                "optimizer_applied": False,
+                            }
+                        ),
+                    )
+                    raise
                 verification = statuses[0].metadata["verification"]
                 logger.info("thundersync_probe_exactness {}", json.dumps(verification))
             status = statuses[0].metadata["train_status"]

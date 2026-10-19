@@ -567,7 +567,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._probe_tokens = 0.0
         self._probe_chunks = 0
         self._probe_metrics = defaultdict(list)
-        self._probe_timing = PhaseBreakdown("ppo_train", enabled=True)
+        self._probe_dropped_group = None
+        self._probe_timing = PhaseBreakdown("ppo_train", enabled=self._policy_train_spans)
         self.optimizer.zero_grad()
         for module in self.actor_module:
             module.zero_grad_buffer()
@@ -628,6 +629,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def ppo_accumulate(self, data) -> None:
         """Add one chunk's unnormalized policy gradient without reduction or an optimizer step."""
         assert self._probe_open and data.metadata["global_step"] == self._probe_step
+        if "probe_dropped_group" in data.metadata:
+            assert self._probe_dropped_group is None, "Mutation may drop only one group"
+            self._probe_dropped_group = data.metadata["probe_dropped_group"]
         self._probe_tokens += self._probe_backward(data, streaming=True)
         self._probe_chunks += 1
 
@@ -705,12 +709,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self._probe_batch = snapshot
             self._probe_batch_norm = norm
             return None
-        noise = self._probe_difference_norm(snapshot, self._probe_batch)
-        difference = self._probe_difference_norm(self._probe_streamed, self._probe_batch)
         batch_norm = self._probe_batch_norm
         assert batch_norm > 0 and math.isfinite(batch_norm), "Exactness check requires a nonzero finite batch gradient"
+        noise = self._probe_difference_norm(snapshot, self._probe_batch) / batch_norm
+        if data.metadata["probe_reference"] == "perturbed1":
+            self._probe_perturbed1 = snapshot
+            self._probe_perturbed1_norm = norm
+            self._probe_noise1 = noise
+            return None
+        assert data.metadata["probe_reference"] == "perturbed2"
+        reference_distance = self._probe_difference_norm(snapshot, self._probe_perturbed1) / batch_norm
+        difference = self._probe_difference_norm(self._probe_streamed, self._probe_batch)
         relative = difference / batch_norm
-        relative_noise = noise / batch_norm
+        max_noise = max(self._probe_noise1, noise)
         cosine = (
             (self._probe_streamed_norm**2 + batch_norm**2 - difference**2)
             / (2 * self._probe_streamed_norm * batch_norm)
@@ -718,30 +729,46 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             else 0.0
         )
         cosine = min(1.0, max(-1.0, cosine))
-        passed = relative <= max(3 * relative_noise, 1e-5) and cosine >= 0.9999
+        threshold = max(3 * max_noise, 1e-5)
+        passed = relative <= threshold and cosine >= 0.9999
+        peak = torch.tensor(torch.cuda.max_memory_allocated(), device=torch.cuda.current_device(), dtype=torch.int64)
+        torch.distributed.all_reduce(peak, op=torch.distributed.ReduceOp.MAX)
         verification = {
             "step": self._probe_step,
             "rank": self._rank,
             "pass": passed,
             "relative_l2": relative,
-            "layout_noise": relative_noise,
+            "noise1": self._probe_noise1,
+            "noise2": noise,
+            "reference_distance": reference_distance,
+            "layout_noise": max_noise,
+            "threshold": threshold,
+            "ratio_to_noise": relative / max_noise if max_noise else None,
             "cosine": cosine,
             "streamed_norm": self._probe_streamed_norm,
             "batch_norm": batch_norm,
-            "perturbed_norm": norm,
+            "perturbed1_norm": self._probe_perturbed1_norm,
+            "perturbed2_norm": norm,
+            "layouts": data.metadata["probe_layouts"],
             "streamed_tokens": self._probe_tokens,
             "batch_tokens": tokens,
             "chunks": self._probe_chunks,
+            "reward_mean": data.metadata["probe_reward_mean"],
+            "mean_response_tokens": data.metadata["probe_mean_response_tokens"],
+            "peak_allocated_bytes_before_optimizer": int(peak.item()),
             "ppo_ratio_exact_unit_fraction": policy_training_metrics(self._probe_metrics, 0).get(
                 "ppo_ratio_exact_unit_fraction"
             ),
-            "mutation": bool(self.cfg.trainer.gradient_streaming.mutate_normalizer),
+            "mutation": bool(
+                self.cfg.trainer.gradient_streaming.mutate_normalizer
+                or self.cfg.trainer.gradient_streaming.drop_one_group
+            ),
+            "dropped_group": self._probe_dropped_group,
         }
         if self._rank == 0:
             logger.info("thundersync_probe_exactness {}", json.dumps(verification))
         if not passed and (
-            self.cfg.trainer.gradient_streaming.mutate_normalizer
-            or not self.cfg.trainer.gradient_streaming.allow_unresolved_exactness
+            verification["mutation"] or not self.cfg.trainer.gradient_streaming.allow_unresolved_exactness
         ):
             raise RuntimeError(f"THUNDERSYNC_EXACTNESS_FAIL {json.dumps(verification)}")
         with torch.no_grad():
@@ -749,6 +776,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 param.grad.copy_(grad.to(param.grad.device))
         self._probe_batch = None
         self._probe_streamed = None
+        self._probe_perturbed1 = None
         output = self._probe_apply_optimizer()
         output.metadata["verification"] = verification
         return output
