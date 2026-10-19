@@ -340,8 +340,17 @@ def dump_per_dataset_eval_results(
     """Dump evaluation results per dataset and overall aggregated results."""
 
     # Prepare common data
-    input_prompts = [tokenizer.decode(prompt) for prompt in trajectory_batch["prompt_token_ids"]]
-    output_responses = [tokenizer.decode(response) for response in trajectory_batch["response_ids"]]
+    row_count = len(trajectory_batch["response_ids"])
+    token_traces = trajectory_batch.get("token_trace_available") or [None] * row_count
+    input_prompts = [
+        None if available is False else tokenizer.decode(prompt)
+        for prompt, available in zip(trajectory_batch["prompt_token_ids"], token_traces, strict=True)
+    ]
+    output_responses = [
+        None if available is False else tokenizer.decode(response)
+        for response, available in zip(trajectory_batch["response_ids"], token_traces, strict=True)
+    ]
+    evidence_messages = trajectory_batch.get("evidence_messages") or [None] * row_count
 
     # Group indices by data source
     data_source_indices = {}
@@ -366,6 +375,12 @@ def dump_per_dataset_eval_results(
                     "response_token_ids": trajectory_batch["response_ids"][i],
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
+                    "token_trace_available": token_traces[i],
+                    # Exact training segments may be empty after an agent history reset.
+                    "evidence_messages": evidence_messages[i],
+                    "harbor_trial_uri": None
+                    if verification is None
+                    else verification.diagnostics.get("harbor_trial_uri"),
                     "score": trajectory_batch["rewards"][i],
                     "stop_reason": trajectory_batch.get("stop_reasons", [None] * len(input_prompts))[i],
                     "exception_type": (trajectory_batch.get("exception_types") or [None] * len(input_prompts))[i],
