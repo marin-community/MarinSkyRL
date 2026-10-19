@@ -1,4 +1,4 @@
-"""FA3 calls whose output for each Grug query row equals a one-row decode step of that row."""
+"""FA3 settings and the request plan under which each Grug query row's output equals its one-row decode step's."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ import numpy as np
 import torch
 
 FLASH_ATTN_VERSION = 3
-# FA3's key tile on Hopper for this head dimension, bf16 and the causal and local kernels (``tile_size_fwd_sm90``):
-# 128 keys whatever the step, so at one split a row's reduction over its keys follows its own position alone.
+HOPPER_COMPUTE_CAPABILITY_MAJOR = 9
+# The head dimension at which FA3's bf16 causal and local kernels on Hopper (``tile_size_fwd_sm90``) read keys in tiles
+# of 128 whatever the step, so at one split a row's reduction over its keys follows its own position alone.
 FA3_HEAD_DIM = 128
 
 

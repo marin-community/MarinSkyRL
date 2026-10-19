@@ -23,10 +23,9 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from skyrl_train.inference_engines.vllm.decode_invariant.fa3 import (
     FA3_HEAD_DIM,
     FLASH_ATTN_VERSION,
+    HOPPER_COMPUTE_CAPABILITY_MAJOR,
     fa3_window_requests,
 )
-
-HOPPER_COMPUTE_CAPABILITY_MAJOR = 9
 
 
 @dataclass
