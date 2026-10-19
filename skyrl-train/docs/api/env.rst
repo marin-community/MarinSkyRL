@@ -1,32 +1,33 @@
-Task session API
+Task rollout API
 ================
 
-``TaskSession`` defines task operations. ``Transition`` contains observations,
-terminal state, rewards, and grading results. The engine owns model inference and token records.
+``StepHarness`` drives episodes with ``prepare``, ``advance``, and ``close`` operations.
+``Transition.data`` carries SkyRL's per-turn reward and grade. The engine owns model
+inference, token records, and the final task grade.
 
-.. autoclass:: rolloutengine.contracts.TaskSession
+.. autoclass:: rolloutengine.harness.step.StepHarness
    :members:
    :member-order: bysource
 
-.. autoclass:: rolloutengine.contracts.SessionStart
+.. autoclass:: rolloutengine.models.Prompt
    :members:
 
-.. autoclass:: rolloutengine.contracts.Transition
+.. autoclass:: rolloutengine.models.Transition
    :members:
 
-.. autoclass:: rolloutengine.contracts.ModelTurn
+.. autoclass:: rolloutengine.models.ModelTurn
    :members:
 
 .. autoclass:: taskcompendium.models.TaskSpec
 
 .. autoclass:: taskcompendium.models.EnvironmentRequirements
 
-.. autoclass:: rolloutengine.spec.MachineRuntimeSpec
+.. autoclass:: rolloutengine.models.MachineRuntimeSpec
 
-.. autoclass:: rolloutengine.spec.TaskRuntimeSpec
+.. autoclass:: rolloutengine.models.RolloutLimits
 
-.. autoclass:: rolloutengine.spec.TaskSessionSpec
+.. autoclass:: rolloutengine.models.TaskRolloutSpec
 
-.. autoclass:: rolloutengine.spec.LoweredTaskSpec
+.. autoclass:: skyrl_gym.task_records.TaskTransition
 
 .. autoclass:: skyrl_gym.source_task.SessionParameters

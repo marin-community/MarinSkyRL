@@ -13,7 +13,7 @@ from examples.nupa.nupa_dataset import (
     validate_records_against_verifier,
     write_parquet,
 )
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn
 from skyrl_gym.answer_tasks import grade_nupa
 
 SYNTHETIC_SOURCE = {

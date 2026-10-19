@@ -7,8 +7,8 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 
 from omegaconf import OmegaConf
-from rolloutengine.contracts import ModelTurn
-from rolloutengine.spec import LoweredTaskSpec
+from rolloutengine.engine import RolloutEngine
+from rolloutengine.models import ModelTurn, TaskRolloutSpec
 from taskcompendium.grading_result import Outcome
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -17,11 +17,12 @@ from transformers import PreTrainedTokenizerFast
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
 from skyrl_train.rollouts.agent_runtime import InstalledAgentRuntime, InstalledAgentSettings
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
+from skyrl_train.rollouts.training_record import training_rollout
 
 
 async def run(config_path: Path) -> None:
     config = json.loads(config_path.read_text())
-    lowered = LoweredTaskSpec.model_validate_json(Path(config["task_path"]).read_text())
+    lowered = TaskRolloutSpec.model_validate_json(Path(config["task_path"]).read_text())
     settings = InstalledAgentSettings.model_validate(config["installed_agent"])
     harbor = HarborTaskSettings.from_config(OmegaConf.create({"harbor": config["harbor"]}))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "canary": 1})))
@@ -37,13 +38,14 @@ async def run(config_path: Path) -> None:
     async with AsyncExitStack() as cleanup:
         await runtime.startup()
         cleanup.push_async_callback(runtime.shutdown)
-        session = runtime.original_session(lowered, config["session_id"], harbor, config["phase"])
-        cleanup.push_async_callback(session.close)
-        request = await session.prepare()
-        if not request.messages:
-            raise ValueError("The installed agent did not request a model response")
+        harness = runtime.original_harness(lowered, config["session_id"], harbor, config["phase"])
         turns = 0
-        for command in config["commands"]:
+
+        async def model(request):
+            nonlocal turns
+            if turns >= len(config["commands"]):
+                raise ValueError("The installed agent requested more turns than the canary supplied")
+            command = config["commands"][turns]
             message = {
                 "role": "assistant",
                 "content": "Synthetic transport canary; not model-generated output.",
@@ -55,13 +57,13 @@ async def run(config_path: Path) -> None:
                     }
                 ],
             }
-            transition = await session.advance(ModelTurn(message, (1,), (1,), (-0.25,), "stop"))
+            prefix = (*request.continuation.served_token_ids, 90, 91) if request.continuation else (1,)
             turns += 1
-            if transition.done:
-                break
-        else:
-            raise RuntimeError("The installed agent did not finish within the configured synthetic turns")
-        grade = await session.grade((), stop_reason="stop", outputs={})
+            return ModelTurn(message, prefix, (1,), (-0.25,), "stop")
+
+        engine = RolloutEngine({}, {lowered.harness: harness})
+        result = training_rollout(await engine.run_task(lowered, model, run_id=config["session_id"]), lowered)
+        grade = result.grade
         result = {
             "synthetic_model": True,
             "turns": turns,

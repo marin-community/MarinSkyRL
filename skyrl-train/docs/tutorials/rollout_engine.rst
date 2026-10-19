@@ -12,7 +12,7 @@ Input rows
 ----------
 
 Use JSON, JSONL, Parquet, or a Hugging Face dataset. Each row contains a
-``lowered_task_spec`` field with a serialized ``LoweredTaskSpec``. ``TaskDataset``
+``task_rollout_spec`` field with a serialized ``TaskRolloutSpec``. ``TaskDataset``
 derives public messages and private worker inputs from that record. Private
 verifier inputs remain inside the task record. The engine sends only public
 instructions and tool observations to the model.
@@ -24,7 +24,7 @@ This example writes one machine-free arithmetic task:
    import json
    from pathlib import Path
 
-   from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
+   from skyrl_gym.rollout_specs import rollout_spec
    from taskcompendium.grader import verifyit_package
    from taskcompendium.models import (
        AnswerType, ConversationInput, EnvironmentRequirements, PlainText, Source, TaskSpec, TextMessage,
@@ -40,24 +40,23 @@ This example writes one machine-free arithmetic task:
        grader=verifyit_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).grader,
        source=Source(dataset="example", revision="1", row="0", importer_revision="1"),
    )
-   lowered = LoweredTaskSpec(
-       task=task,
-       runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-       session=TaskSessionSpec(
-           task_session="shellbox",
-           max_turns=1,
-           model_turn_timeout=60,
-           command_timeout=None,
-           tool_turn_timeout=None,
-           total_turn_timeout=60,
-           attempt_timeout=90,
-           verifier_timeout=30,
-           cleanup_timeout=10,
-           max_total_tokens=None,
-       ),
+   spec = rollout_spec(
+       task,
+       {
+           "task_session": "shellbox",
+           "max_turns": 1,
+           "model_turn_timeout": 60,
+           "command_timeout": None,
+           "tool_turn_timeout": None,
+           "total_turn_timeout": 60,
+           "attempt_timeout": 90,
+           "verifier_timeout": 30,
+           "cleanup_timeout": 10,
+           "max_total_tokens": None,
+       },
    )
    row = {
-       "lowered_task_spec": lowered.model_dump_json(),
+       "task_rollout_spec": spec.model_dump_json(),
    }
    Path("tasks.jsonl").write_text(json.dumps(row) + "\n")
 
@@ -76,8 +75,8 @@ Its ``context_budget.request_window_tokens`` sets the context window.
 ``context_budget.max_new_tokens_per_turn`` limits each response.
 The task record supplies session turn limits and execution deadlines.
 
-Iris launches support machine-free tasks. Docker-backed tasks require Docker,
-Skopeo, and access to a Docker daemon on the rollout worker host.
+Iris launches support machine-free tasks. Docker-backed tasks require Docker
+and access to a Docker daemon on the rollout worker host.
 When an executable is unavailable, the worker rejects a batch whose task or verifier machine selects Docker before model requests.
 Machine-free tasks do not require those executables.
 

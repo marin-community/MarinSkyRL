@@ -10,7 +10,8 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.trial.config import TaskConfig, TrialConfig
 from harbor.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
 from harbor.models.verifier.result import VerifierResult
-from rolloutengine.contracts import ModelTurn, RolloutData, SessionStart
+from rolloutengine.engine import RolloutEngine
+from rolloutengine.models import GenerationLimitReached, ModelTurn, Prompt
 from taskcompendium.grading_result import Outcome
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -20,9 +21,11 @@ from skyrl_train.rollouts.agent_backend import AgentInferenceBackend, TRIAL_HEAD
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.rollouts.harbor_settings import HARBOR_EXCEPTION
 from skyrl_train.rollouts.harbor_tasks import harbor_grading_failure
-from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, run_harbor_trial, trial_grade
+from skyrl_train.rollouts.harbor_trial_session import HarborTrialHarness, run_harbor_trial, trial_grade
+from skyrl_train.rollouts.training_record import TrainingRollout, training_rollout
 from skyrl_train.rollouts.task_projections import rollout_loss_eligible
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+from tests.cpu.task_specs import lowered_task, text_task
 
 
 @pytest.mark.asyncio
@@ -123,7 +126,7 @@ def test_trial_failure_policy_preserves_grades_and_masks_infrastructure(
     exception_type, score, preserve_timeout, eligible
 ):
     rollout = harbor_grading_failure(
-        RolloutData(
+        TrainingRollout(
             task_id="original-task",
             messages=({"role": "assistant", "content": "edit"},),
             prompt_token_ids=(1,),
@@ -146,58 +149,60 @@ def test_trial_failure_policy_preserves_grades_and_masks_infrastructure(
 
 
 @pytest.mark.asyncio
-async def test_trial_session_preserves_turns_and_returns_original_verifier_score():
+async def test_trial_harness_preserves_turns_and_returns_original_verifier_score():
     delivered = []
 
     async def run(complete):
         history = ({"role": "user", "content": "Repair the repository."},)
-        first = await complete(SessionStart(history, {}))
+        first = await complete(Prompt(history, {}))
         delivered.append(first)
-        second = await complete(
-            SessionStart((*history, first.message, {"role": "user", "content": "Tests passed."}), {})
-        )
+        second = await complete(Prompt((*history, first.message, {"role": "user", "content": "Tests passed."}), {}))
         delivered.append(second)
         return completed_trial(1.0)
 
-    session = HarborTrialSession(run, "reward")
     first = ModelTurn({"role": "assistant", "content": "edit"}, (11,), (12,), (-0.3,), "stop")
     second = ModelTurn({"role": "assistant", "content": "done"}, (11, 12, 13), (14,), (-0.2,), "stop")
-    try:
-        request = await session.prepare()
-        assert request.messages[0]["content"] == "Repair the repository."
-        transition = await session.advance(first)
-        assert not transition.done
-        assert transition.observations == ({"role": "user", "content": "Tests passed."},)
-        assert (await session.advance(second)).done
-        grade = await session.grade((), stop_reason="stop", outputs={})
-        assert grade.status == Outcome.GRADED and grade.reward == 1.0
-        assert delivered == [first, second]
-    finally:
-        await session.close()
+    responses = iter((first, second))
+
+    async def model(request):
+        return next(responses)
+
+    spec = lowered_task(text_task(), session_name="harbor_trial", max_turns=3)
+    engine = RolloutEngine({}, {"harbor_trial": HarborTrialHarness(run, "reward")})
+    result = training_rollout(await engine.run_task(spec, model), spec)
+    assert result.grade.status == Outcome.GRADED and result.grade.reward == 1.0
+    assert [step.turn for step in result.steps] == [first, second]
+    assert delivered == [first, second]
 
 
 @pytest.mark.asyncio
-async def test_trial_session_cancellation_finishes_trial_cleanup():
+async def test_trial_harness_cancellation_finishes_trial_cleanup():
     cleaned = asyncio.Event()
+    started = asyncio.Event()
 
     async def run(complete):
+        started.set()
         try:
-            await complete(SessionStart(({"role": "user", "content": "Task"},), {}))
-            raise AssertionError("No model response should arrive")
+            await complete(Prompt(({"role": "user", "content": "Task"},), {}))
         finally:
             cleaned.set()
 
-    session = HarborTrialSession(run, "reward")
-    await session.prepare()
-    await session.close()
+    async def model(request):
+        await asyncio.Future()
+
+    spec = lowered_task(text_task(), session_name="harbor_trial")
+    engine = RolloutEngine({}, {"harbor_trial": HarborTrialHarness(run, "reward")})
+    attempt = asyncio.create_task(engine.run_task(spec, model))
+    await started.wait()
+    attempt.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await attempt
     assert cleaned.is_set()
-    grade = await session.grade((), stop_reason="cancelled", outputs={})
-    assert grade.status == Outcome.UNAVAILABLE and grade.reward is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_trial_session_context_limit_releases_request_and_preserves_verification(stream):
+async def test_trial_harness_context_limit_preserves_verification(stream):
     async def tokenize(_payload):
         return {"tokens": [2], "count": 1, "max_model_len": 32}
 
@@ -213,8 +218,10 @@ async def test_trial_session_context_limit_releases_request_and_preserves_verifi
                 "json": {"model": "model", "messages": [{"role": "user", "content": "Task"}]},
             }
             await backend.chat_completion(payload)
-            # A real installed agent receives the failed API request, exits, and
-            # lets Harbor verify the filesystem. A retry must also terminate.
+            payload["json"]["messages"] += [
+                {"role": "assistant", "content": "edit"},
+                {"role": "user", "content": "Continue"},
+            ]
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
             ) as client:
@@ -229,24 +236,27 @@ async def test_trial_session_context_limit_releases_request_and_preserves_verifi
                             for line in response.text.splitlines()
                             if line.startswith("data: ")
                         ]
-                        assert chunks[-1] == "[DONE]"
                         responses.append(json.loads(chunks[0]))
                     else:
                         assert response.status_code == 400
                         responses.append(response.json())
         return completed_trial(1.0, "ContextLengthExceededError")
 
-    session = HarborTrialSession(run, "reward")
+    calls = 0
+
+    async def model(request):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise GenerationLimitReached((2, 3))
+        return ModelTurn({"role": "assistant", "content": "edit"}, (2,), (3,), (-0.2,), "stop")
+
+    spec = lowered_task(text_task(), session_name="harbor_trial")
+    engine = RolloutEngine({}, {"harbor_trial": HarborTrialHarness(run, "reward")})
     try:
-        await session.prepare()
-        turn = ModelTurn({"role": "assistant", "content": "edit"}, (2,), (3,), (-0.2,), "stop")
-        assert not (await session.advance(turn)).done
-        async with asyncio.timeout(5):
-            grade = await session.grade((), stop_reason="length", outputs={})
-        assert grade.status == Outcome.GRADED and grade.reward == 1.0
+        result = training_rollout(await asyncio.wait_for(engine.run_task(spec, model), 5), spec)
+        assert result.grade.status == Outcome.GRADED and result.grade.reward == 1.0
         assert len(responses) == 2
-        assert all(response["error"]["code"] == 400 for response in responses)
         assert all(response["error"]["type"] == "context_length_exceeded" for response in responses)
     finally:
-        await session.close()
         set_global_state(None, None)

@@ -30,7 +30,7 @@ from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.curriculum import dataset_bins
-from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, machine_runtime, session_spec, task_input
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, machine_runtime, session_limits, task_input
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request, validate_trajectory_batch
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
@@ -67,7 +67,7 @@ async def test_native_daytona_worker_uses_explicit_account_at_http_boundary(monk
 @pytest.mark.asyncio
 async def test_worker_remote_judge_uses_runtime_secret_and_emits_training_reward(task_inputs, monkeypatch):
     config, request = task_inputs
-    task = request.rows[0].lowered
+    task = request.rows[0].spec
     grader = verifyit_package(
         JudgeSpec(
             rubric="labels",
@@ -79,8 +79,10 @@ async def test_worker_remote_judge_uses_runtime_secret_and_emits_training_reward
         ),
         environment=NATIVE_ENVIRONMENT,
     ).grader
-    task = lowered_task(task.task.model_copy(update={"grader": grader}), verifier_backend="docker")
-    request = replace(request, rows=(replace(request.rows[0], lowered=task),))
+    task = lowered_task(task.task.model_copy(update={"grader": grader}))
+    request = replace(request, rows=(replace(request.rows[0], spec=task),))
+    for name in ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TEST_ROLLOUT_JUDGE_KEY", "worker-only-secret")
     settings = RemoteJudgeSettings("https://judge.invalid/v1", "TEST_ROLLOUT_JUDGE_KEY")
     observed = []
@@ -127,7 +129,7 @@ async def test_worker_remote_judge_uses_runtime_secret_and_emits_training_reward
 async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(task_inputs, projection_type, session):
     config, original = task_inputs
     failed = source_task(
-        conversation_messages(original.rows[0].lowered.task.context.events),
+        conversation_messages(original.rows[0].spec.task.context.events),
         {"reward_spec": {"ground_truth": "not JSON"}, "reward_model": {"ground_truth": "not JSON"}},
         {},
         Source(dataset="corrupt", revision="1", row="0", importer_revision="1"),
@@ -219,7 +221,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
         100,
         environment_configs={
             **OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
-            "session": session_spec().model_dump(exclude={"task_session"}),
+            "session": session_limits(),
         },
         terminal_bench_data=[str(source)],
         cache_dir=tmp_path / "tasks",
@@ -335,7 +337,7 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
         100,
         environment_configs={
             **OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
-            "session": session_spec().model_dump(exclude={"task_session"}),
+            "session": session_limits(),
         },
         num_workers=1,
     )
@@ -386,7 +388,7 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
     config, request = task_inputs
     task = source_row_task(
         {
-            "prompt": conversation_messages(request.rows[0].lowered.task.context.events),
+            "prompt": conversation_messages(request.rows[0].spec.task.context.events),
             "env_class": environment,
             **extras,
         },
@@ -394,7 +396,7 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
         source_name="fixture",
         environment_configs={
             **OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
-            "session": session_spec().model_dump(exclude={"task_session"}),
+            "session": session_limits(),
         },
     )
     request = replace(request, rows=(task_input(task),))
@@ -439,7 +441,7 @@ async def test_source_row_turn_limit_controls_correction_and_terminal_grade(
     config, request = task_inputs
     task = source_row_task(
         {
-            "prompt": conversation_messages(request.rows[0].lowered.task.context.events),
+            "prompt": conversation_messages(request.rows[0].spec.task.context.events),
             "env_class": "gsm8k_multi_turn",
             "reward_spec": {"ground_truth": "12"},
             **row_limits,
@@ -447,7 +449,7 @@ async def test_source_row_turn_limit_controls_correction_and_terminal_grade(
         0,
         source_name="fixture",
         environment_configs={
-            "session": session_spec(max_turns=1).model_dump(exclude={"task_session"}),
+            "session": session_limits(max_turns=1),
             "gsm8k_multi_turn": session_config,
         },
     )
@@ -465,7 +467,7 @@ async def test_source_row_turn_limit_controls_correction_and_terminal_grade(
 async def test_materialized_turn_limit_precedes_source_row_metadata(task_inputs):
     config, request = task_inputs
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {"reward_spec": {"ground_truth": "12"}, "max_turns": 1},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -488,7 +490,7 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
     config, request = task_inputs
     config.chat_template_kwargs = {"enable_thinking": enable_thinking}
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         extras={reward_key: {"ground_truth": "12"}},
         config={"length_penalty_weight": 1.0, "min_response_length": 0, "evaluation_token_budget": 1},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -579,7 +581,7 @@ async def test_context_limits_preserve_only_completed_gym_turns(
     config.sampling_params.logprobs = 0
     request = replace(request, sampling_params=None if output_limit is None else {"max_tokens": output_limit})
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {"reward_spec": {"ground_truth": "12"}},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -653,7 +655,7 @@ async def test_lean_refinement_discards_the_failed_attempt(task_inputs, task_mac
         }
     }
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         extras,
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -745,7 +747,7 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
     }
     expected = "7" if per_agent else "4"
     row = {
-        "prompt": conversation_messages(request.rows[0].lowered.task.context.events),
+        "prompt": conversation_messages(request.rows[0].spec.task.context.events),
         "env_class": "nemotron_ultra",
         "extra_info": {
             "nemotron_ultra": {
@@ -761,7 +763,7 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
         0,
         source_name="source",
         environment_configs={
-            "session": session_spec().model_dump(exclude={"task_session"}),
+            "session": session_limits(),
             "nemotron_ultra": environment,
         },
     )
@@ -885,7 +887,7 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
         }
     )
     failed = source_task(
-        conversation_messages(original.rows[0].lowered.task.context.events),
+        conversation_messages(original.rows[0].spec.task.context.events),
         extras,
         {},
         Source(dataset="python-startup", revision="1", row="0", importer_revision="1"),

@@ -5,7 +5,7 @@ Canonical task rollouts
 The engine owns model calls, conversation and exact-token accumulation, deadlines, and resource cleanup.
 The worker controls concurrency, retries, group grading, and training projections.
 
-``RolloutEngine.run(lowered)`` asynchronously executes one task. The worker
+``RolloutEngine.run_task(spec, model)`` asynchronously executes one task. The worker
 starts one coroutine for each task, and inference runs on the worker's event
 loop. Synchronous graders use a separate executor. Shellbox commands use asynchronous machine operations.
 ``trajectory_runner.max_concurrent_tasks`` limits active task coroutines.
@@ -14,10 +14,10 @@ Its default is 32 per worker. The verifier thread count does not set task concur
 Task and environment operations
 -------------------------------
 
-A task Parquet file contains one serialized ``LoweredTaskSpec`` per row in the
-``lowered_task_spec`` column. The record preserves a ``TaskSpec`` and adds machine selections and session limits.
+A task Parquet file contains one serialized ``TaskRolloutSpec`` per row in the
+``task_rollout_spec`` column. The record preserves a ``TaskSpec`` and adds machine selections and rollout limits.
 The task declares public context, tools, an answer format, a typed grader, resources, and environment requirements.
-Custom sessions use ``SessionGrader`` and retain private settings in a ``config.json`` verifier resource.
+Custom episodes use ``NoGrader`` and retain private settings in its contract and a ``config.json`` verifier resource.
 
 ``skyrl_train.entrypoints.main_base`` converts source rows through
 ``SourceTaskDataset`` with Hugging Face ``Dataset.map``.
@@ -29,9 +29,9 @@ The `SWE example <../../examples/mini_swe_agent/README.md>`_ uses this entrypoin
 directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
 Harbor caches private task Parquet in ``data.task_cache_dir``.
 Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), records)``.
-``LoweredTaskSpec.runtime`` selects optional task and verifier machines through ``MachineRuntimeSpec``.
+``TaskRolloutSpec.task_machine`` and ``verifier_machine`` select optional machines through ``MachineRuntimeSpec``.
 Each machine selection supplies a configured backend identifier, network policy, hardware limits, user, and startup or cleanup deadline.
-``LoweredTaskSpec.session`` supplies the session factory identifier, turn limit, model and command caps, tool-turn deadline, cumulative turn deadline, attempt deadline, and verifier deadline.
+``TaskRolloutSpec.harness`` selects the harness. ``TaskRolloutSpec.limits`` supplies the turn and token caps, model and tool deadlines, cumulative turn deadline, attempt deadline, and verifier deadline. Shell command settings travel with the shell harness identifier.
 Its cleanup deadline requires an explicit finite, positive value.
 Tasks support one stage and prebuilt, digest-pinned images. Multi-stage packages and task-specific image builds cause rejection.
 TaskCompendium defines task serialization. SkyRL owns its dataset file format.
@@ -40,22 +40,19 @@ rows through ``NemotronTaskDataset``. Terminal rows contain the executable task 
 The worker does not require the original task directories.
 ``harbor.max_turns`` and Harbor exception settings apply only to Harbor tasks.
 These exception settings include ``harbor.mask_exceptions`` and ``harbor.default_error_treatment``.
-Other tasks use their lowered session limits and ``generator.error_handling``.
+Other tasks use their stored rollout limits and ``generator.error_handling``.
 See :doc:`../datasets/dataset-preparation` for source rows and training inputs.
 Whole-trajectory and per-step output preserve task order,
 teacher routes, and source labels. A teacher route identifies the configured teacher model for distillation of that row.
 
-The worker supplies explicit factories from ``skyrl_gym/task_factories.py``.
-Each factory creates a direct implementation of Marin's ``TaskSession`` protocol.
-The engine passes a ``TaskSessionContext`` to each factory. ``skyrl-gym`` sessions grade
-themselves; the installed Harbor-agent session uses the context's task grader.
-The session prepares the task, executes model actions, returns observations, and grades the result.
-The engine creates its Shellbox machine and closes the session before the machine.
-Pure answer graders use ``runtime.task_machine=None`` and do not create a machine.
-Each session returns its initial messages and model options in ``SessionStart``.
+The worker supplies episode factories from ``skyrl_gym/task_factories.py`` as ``StepHarness`` instances.
+Each episode prepares the task, executes model actions, returns observations, and supplies a SkyRL grade.
+The engine creates its Shellbox machine and closes the episode before the machine.
+Pure answer graders use ``task_machine=None`` and do not create a machine.
+Each episode returns its initial messages and model options in ``Prompt``.
 
-The worker registers the native ``docker`` backend only when Docker and the configured Skopeo executable are available.
-It validates each ``LoweredTaskSpec`` record's backend and session before it starts a batch.
+The worker registers the native ``docker`` backend when the Docker executable is available.
+It validates each ``TaskRolloutSpec`` record's backend and harness before it starts a batch.
 An unavailable backend aborts the batch before model requests and buffer writes.
 The per-row infrastructure error policy does not mask this deployment error.
 Machine-free tasks do not require these executables, even when unused session configuration selects Docker.
@@ -90,7 +87,7 @@ Installed Harbor agents
 Set ``terminal_bench_config.installed_agent`` to run an installed Harbor agent
 for Harbor-tagged tasks. Without this block, the worker uses the generic shell
 session. The worker selects its ``skyrl_agent`` session when this block is set.
-The agent session controls its prompts and tool loop. RolloutEngine retains
+The agent harness controls its prompts and tool loop. RolloutEngine retains
 model calls, sampled token IDs and log probabilities, grading, and machine ownership.
 The runtime requires the full Harbor package and an Iris worker with a
 controller-reachable advertised address. The Iris controller must issue capability
@@ -102,7 +99,7 @@ The installed-agent block requires ``agent`` (a Harbor ``AgentConfig``),
 ``service_startup_timeout``, and ``service_shutdown_timeout``. Timeouts are in
 seconds. The task's total-turn timeout replaces ``run_timeout`` when set.
 The task context must contain exactly one user message with string content.
-``LoweredTaskSpec.runtime.task_machine`` must select a task machine.
+``TaskRolloutSpec.task_machine`` must select a task machine.
 Private verifier files remain on the separate verifier machine.
 
 The worker creates a per-attempt protocol proxy and a leased Iris HTTP route.
@@ -140,7 +137,7 @@ replace that recorded message with different text.
 Token-contract violations abort the prompt group.
 
 One transition follows each model response, including the final response.
-The engine uses each lowered record's ``session.max_turns``.
+The engine uses each stored record's ``limits.max_turns``.
 Source conversion applies the row and source-family limits described above.
 The worker applies ``harbor.max_turns`` to Harbor tasks.
 A session can finish earlier.
@@ -167,7 +164,7 @@ Otherwise, it uses the task grade.
 Math, multiplication, search, SearchCode, and SQL sessions keep the final task verdict separate from optimization rewards.
 Their task grade does not average tool or correction turns. Format rewards do not count as correct answers.
 Step projection uses each turn's reward, with the task grade on the last turn when no per-turn rewards exist.
-A no-grade verifier result with ``RolloutData.failure=None`` excludes tokens from loss and baseline calculations.
+A no-grade verifier result without a rollout failure excludes tokens from loss and baseline calculations.
 Recorded execution failures, including verifier timeouts, use the exception policy.
 They receive zero optimization reward when no grade is available.
 Explicitly skipped grading can use a session's optimization reward.

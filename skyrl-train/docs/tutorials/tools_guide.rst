@@ -2,8 +2,8 @@ Execute task tools with Shellbox
 ================================
 
 A task session receives its prepared Shellbox ``Machine``.
-The engine combines ``TaskSpec.environment_requirements`` with ``LoweredTaskSpec.runtime`` to create the machine.
-It closes the session before the machine.
+The engine combines ``TaskSpec.environment_requirements`` with ``TaskRolloutSpec.task_machine`` to create the machine.
+It closes the episode before the machine.
 
 The machine provides command execution and file transfer:
 

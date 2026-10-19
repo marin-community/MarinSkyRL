@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn
 from skyrl_gym.source_task import source_task
 from skyrl_gym.task_sessions import SearchTaskSession
 from taskcompendium.chat import chat_conversation

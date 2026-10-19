@@ -5,7 +5,7 @@ import httpx
 import pytest
 from openai.types.chat import ChatCompletionToolParam
 from pydantic import TypeAdapter
-from rolloutengine.contracts import ModelRequest, ModelTurn
+from rolloutengine.models import ModelRequest, ModelTurn
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
@@ -111,7 +111,7 @@ async def test_agent_chat_tools_reach_serving_without_double_wrapping():
     async def complete(request):
         return await _model_turn(
             client,
-            ModelRequest(request.messages, request.options, (), None),
+            ModelRequest(request.messages, request.options),
             sampling_params={},
             max_context_length=32,
             max_prompt_length=None,

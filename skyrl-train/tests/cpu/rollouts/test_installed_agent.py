@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.task.config import EnvironmentConfig
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Command, MachineSpec, PackageSpec
 from tokenizers import Tokenizer

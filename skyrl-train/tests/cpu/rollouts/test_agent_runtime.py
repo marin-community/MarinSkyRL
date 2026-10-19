@@ -11,8 +11,9 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig
-from rolloutengine.contracts import ModelTurn, RolloutContractError
-from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec
+from rolloutengine.engine import RolloutEngine
+from rolloutengine.models import GradedRolloutInterrupted, ModelTurn, RolloutOperation
+from taskcompendium.grading_result import Outcome
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineSpec, PackageSpec
 from shellbox.image import RegistryImage, image_source_key
@@ -96,12 +97,12 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
     session = (
         task_inputs[1]
         .rows[0]
-        .lowered.session.model_copy(
+        .spec.limits.model_copy(
             update={"attempt_timeout": 3000, "cleanup_timeout": 120, "total_turn_timeout": None, "max_turns": 999999}
         )
     )
-    lowered = LoweredTaskSpec(
-        task=task, runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None), session=session
+    lowered = (
+        task_inputs[1].rows[0].spec.model_copy(update={"task": task, "limits": session, "harness": "harbor_trial"})
     )
     settings = InstalledAgentSettings(
         agent=AgentConfig(
@@ -132,10 +133,16 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
         environment=EnvironmentConfig(import_path=f"{__name__}:UnavailableEnvironment"),
     )
     await runtime.startup()
-    original = runtime.original_session(lowered, "trial", harbor, "train")
+    original = runtime.original_harness(lowered, "trial", harbor, "train")
     try:
-        with pytest.raises(RolloutContractError, match="exited before requesting"):
-            await original.prepare()
+
+        async def no_model_request(request):
+            raise AssertionError("The failed environment must not request inference")
+
+        with pytest.raises(GradedRolloutInterrupted) as failure:
+            await RolloutEngine({}, {"harbor_trial": original}).run_task(lowered, no_model_request)
+        assert failure.value.operation == RolloutOperation.PREPARE
+        assert failure.value.grade.status == Outcome.UNAVAILABLE
         results = list((tmp_path / "published").glob("*/trials/*/result.json"))
         result = json.loads(results[0].read_text())
         assert result["exception_info"]["exception_message"] == "container service unavailable"
@@ -143,7 +150,6 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
         # The token is minted before container setup, whose allowance is 600 seconds.
         assert requested[0] > 600 + 300 + 1800 + 120
     finally:
-        await original.close()
         await runtime.shutdown()
 
 
@@ -211,7 +217,7 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
     )
     runtime = InstalledAgentRuntime(settings, AgentInferenceBackend("model", 32, tokenize, tokenizer), 8)
     worker_config, request = task_inputs
-    task = request.rows[0].lowered.task
+    task = request.rows[0].spec.task
     task = task.model_copy(
         update={
             "context": ConversationInput(events=(TextMessage(role="user", content="Original BFCL instruction"),)),

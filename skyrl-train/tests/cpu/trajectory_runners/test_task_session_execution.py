@@ -9,10 +9,11 @@ from omegaconf import OmegaConf
 from skyrl_gym.answer_tasks import grade_gsm8k
 from skyrl_gym.task_sessions import AnswerTaskSession
 from skyrl_gym.verification import VerificationStatus
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn
 from taskcompendium.grading_result import Outcome
 from transformers import AutoTokenizer
 from skyrl_gym.source_task import source_task
+from skyrl_gym.rollout_specs import rollout_spec
 from taskcompendium.models import NoGrader, Source
 from shellbox.backends.daytona.machine import DaytonaMachineFactory
 from tests.cpu.task_specs import lowered_task, task_input
@@ -104,16 +105,11 @@ async def test_cpu_worker_runs_machine_free_rows_and_checks_native_tools(
             source_name="tiny",
             environment_configs=OmegaConf.to_container(cfg.environment.task_sessions, resolve=True),
         )
-        harbor_task = native.model_copy(
-            update={
-                "task": native.task.model_copy(
-                    update={
-                        "tags": ("harbor",),
-                        "grader": NoGrader(reason="fixture"),
-                    }
-                ),
-                "session": native.session.model_copy(update={"task_session": "shellbox"}),
-            }
+        harbor_task = rollout_spec(
+            native.task.model_copy(update={"tags": ("harbor",), "grader": NoGrader(reason="fixture")}),
+            {**native.limits.model_dump(), "task_session": "shellbox", "command_timeout": 1},
+            task_machine=native.task_machine,
+            verifier_machine=native.verifier_machine,
         )
         for backend, candidate in (("docker", native), ("harbor", harbor_task)):
             mixed = replace(

@@ -3,33 +3,31 @@
 import re
 from typing import Any
 
-from rolloutengine.contracts import ModelTurn, SessionStart, Transition
+from rolloutengine.models import ModelTurn, Prompt, TaskRolloutSpec
 from shellbox.machine import Machine
 from skyrl_gym.source_task import session_parameters
 from taskcompendium.grading_result import GradeResult, Outcome
-from rolloutengine.spec import LoweredTaskSpec
-from rolloutengine.task_session import session_start
 
 from skyrl_gym.answer_tasks import ground_truth
-from skyrl_gym.task_records import terminal_grade
+from skyrl_gym.task_records import TaskTransition, episode_prompt, terminal_grade
 
 
 class MultiplyTaskSession:
     """Keep the multiplication reference and return feedback until completion."""
 
-    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
+    def __init__(self, lowered: TaskRolloutSpec, machine: Machine | None):
         task = lowered.task
         parameters = session_parameters(task)
         extras = parameters.extras
         self.task = task
         self.expected = str(ground_truth(extras)).strip()
-        self.max_turns = lowered.session.max_turns
+        self.max_turns = lowered.limits.max_turns
         self.grades: list[GradeResult] = []
 
-    async def prepare(self) -> SessionStart:
-        return session_start(self.task, shell_tool=None, provider_tools=())
+    async def prepare(self) -> Prompt:
+        return episode_prompt(self.task)
 
-    async def advance(self, turn: ModelTurn) -> Transition:
+    async def advance(self, turn: ModelTurn) -> TaskTransition:
         match = re.search(r"\\boxed\{([^}]+)\}", turn.text)
         answer = match.group(1) if match else None
         correct = answer is not None and answer.strip() == self.expected
@@ -42,7 +40,7 @@ class MultiplyTaskSession:
             if answer is not None
             else r"Please provide your answer in the format \boxed{your_answer}."
         )
-        return Transition(
+        return TaskTransition(
             done=done,
             observations=() if done else ({"role": "user", "content": feedback},),
             reward=reward,

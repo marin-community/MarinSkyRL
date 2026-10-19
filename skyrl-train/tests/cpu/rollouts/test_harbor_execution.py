@@ -34,7 +34,7 @@ from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
-from rolloutengine.spec import LoweredTaskSpec
+from rolloutengine.models import TaskRolloutSpec
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, session_spec, task_input
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
@@ -43,10 +43,10 @@ from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFact
 
 def test_explicit_null_eval_timeout_preserves_full_trial_deadlines(task_inputs):
     _, request = task_inputs
-    original = request.rows[0].lowered
+    original = request.rows[0].spec
     original = original.model_copy(
         update={
-            "session": original.session.model_copy(
+            "limits": original.limits.model_copy(
                 update={
                     "total_turn_timeout": None,
                     "attempt_timeout": 3000,
@@ -57,16 +57,16 @@ def test_explicit_null_eval_timeout_preserves_full_trial_deadlines(task_inputs):
     )
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"eval_timeout_override_sec": None}}))
     configured = settings.lowered(original, phase="eval")
-    assert configured.session.total_turn_timeout is None
-    assert configured.session.attempt_timeout == 3000
-    assert configured.session.verifier_timeout == 600
+    assert configured.limits.total_turn_timeout is None
+    assert configured.limits.attempt_timeout == 3000
+    assert configured.limits.verifier_timeout == 600
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["train", "eval"])
 async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs, phase):
     config, original = task_inputs
-    lowered = original.rows[0].lowered
+    lowered = original.rows[0].spec
     native = lowered.task.model_copy(
         update={
             "environment_requirements": EnvironmentRequirements(
@@ -192,7 +192,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     native = HarborTaskDataset(
         [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "native", num_workers=1
     )
-    assert LoweredTaskSpec.model_validate_json(native[0][2]["lowered_task_spec"]).task.resources.verifier
+    assert TaskRolloutSpec.model_validate_json(native[0][2]["task_rollout_spec"]).task.resources.verifier
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"verifier_disable": True}}))
     prepared = HarborTaskDataset(
         [str(source)],
@@ -204,10 +204,10 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
         num_workers=1,
     )
     prompt, env, extras, uid = prepared[0]
-    assert LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]).task.resources.verifier == ()
+    assert TaskRolloutSpec.model_validate_json(extras["task_rollout_spec"]).task.resources.verifier == ()
     request = replace(
         request,
-        rows=(task_input(LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]), metric_class=env),),
+        rows=(task_input(TaskRolloutSpec.model_validate_json(extras["task_rollout_spec"]), metric_class=env),),
         trajectory_ids=(TrajectoryID(uid, 0),),
     )
     request = replace(request, batch_metadata=BatchMetadata(0, phase))
@@ -248,7 +248,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
 @pytest.mark.parametrize("failure_stage", ["startup", "model", "verifier", "attempt", "cancel", "cancel_model"])
 async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected_result(task_inputs, failure_stage):
     config, request = task_inputs
-    task = request.rows[0].lowered.task
+    task = request.rows[0].spec.task
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
@@ -441,7 +441,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
 )
 async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase, failure):
     config, request = task_inputs
-    task = request.rows[0].lowered.task
+    task = request.rows[0].spec.task
     failing_command = {
         "missing": "true",
         "retry_missing": "true",
@@ -607,7 +607,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
 @pytest.mark.parametrize("stop_reason,expected", [("stop", 1.3), ("length", 0.8)])
 async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs, stop_reason, expected):
     config, request = task_inputs
-    task = request.rows[0].lowered.task
+    task = request.rows[0].spec.task
     verifier = ScriptGrader(
         environment=NATIVE_ENVIRONMENT,
         answer_path=None,
@@ -663,7 +663,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
 @pytest.mark.parametrize("shaper", ["threshold", "identity_aware_pass_ratio"])
 async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs, shaper):
     config, request = task_inputs
-    base = request.rows[0].lowered.task
+    base = request.rows[0].spec.task
     tasks = []
     for output in ("unrecognized output", "tests/test_task.py::test_answer PASSED"):
         verifier = ScriptGrader(
@@ -721,7 +721,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
 @pytest.mark.parametrize("phase", ["train", "eval"])
 async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
     config, request = task_inputs
-    base = request.rows[0].lowered.task
+    base = request.rows[0].spec.task
     tasks = [base.model_copy(update={"id": "harbor", "tags": ("harbor",)})] * 2 + [base]
     admitted = []
     active_harbor = 0
@@ -848,9 +848,9 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     assert len(restored) == 2
     assert restored[1][1] == "tool_protocol_replay"
     replay_session = ToolProtocolReplaySession(
-        LoweredTaskSpec.model_validate_json(restored[1][2]["lowered_task_spec"]), None
+        TaskRolloutSpec.model_validate_json(restored[1][2]["task_rollout_spec"]), None
     )
-    assert (await replay_session.prepare()).prompt_token_ids == (128000, 128005)
+    assert (await replay_session.prepare()).token_ids == (128000, 128005)
     prompt, env, extras, uid = restored[0]
 
     class ImageFactory:
@@ -886,7 +886,7 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     config, request = task_inputs
     request = replace(
         request,
-        rows=(task_input(LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]), metric_class=env),),
+        rows=(task_input(TaskRolloutSpec.model_validate_json(extras["task_rollout_spec"]), metric_class=env),),
         trajectory_ids=(TrajectoryID(uid, 0),),
     )
     worker = TaskRolloutWorker(

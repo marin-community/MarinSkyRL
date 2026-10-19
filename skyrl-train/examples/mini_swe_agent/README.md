@@ -23,7 +23,7 @@ uv run --no-sync --project .. examples/mini_swe_agent/preprocess_swegym.py \
 Replace the two revision values with pinned dataset commit IDs. The converter
 reads `SumanthRH/SWE-Gym-Subset` for training and
 `SumanthRH/SWE-bench_Verified` for evaluation. Each output row contains one
-serialized `LoweredTaskSpec` in the `lowered_task_spec` column. The evaluation script stays in
+serialized `TaskRolloutSpec` in the `task_rollout_spec` column. The evaluation script stays in
 the private verifier fields.
 
 The image manifest maps every selected instance ID to a prebuilt image reference with its SHA-256 digest.
@@ -43,11 +43,11 @@ List the task images from the materialized files:
 uv run --no-sync --project .. python - <<'PY'
 from pathlib import Path
 from datasets import Dataset
-from rolloutengine.spec import LoweredTaskSpec
+from rolloutengine.models import TaskRolloutSpec
 
 directory = Path("~/data/swe_gym_subset").expanduser()
 images = {
-    LoweredTaskSpec.model_validate_json(row["lowered_task_spec"]).task.environment_requirements.docker_image
+    TaskRolloutSpec.model_validate_json(row["task_rollout_spec"]).task.environment_requirements.docker_image
     for name in ("train.parquet", "validation.parquet")
     for row in Dataset.from_parquet(str(directory / name))
 }

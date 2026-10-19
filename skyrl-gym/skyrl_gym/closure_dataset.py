@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
-from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
+from rolloutengine.models import TaskRolloutSpec
 from taskcompendium.models import Source
 
 from skyrl_gym.closure_task import STRUCTURE_CLOSURE_SESSION, ClosurePrompt
 from skyrl_gym.source_task import source_task
+from skyrl_gym.rollout_specs import rollout_spec
 
 
 class ConversionFailure(TypedDict):
@@ -20,11 +21,11 @@ class ConversionFailure(TypedDict):
 
 @dataclass(frozen=True)
 class ClosureConversion:
-    tasks: tuple[LoweredTaskSpec, ...]
+    tasks: tuple[TaskRolloutSpec, ...]
     failures: tuple[ConversionFailure, ...]
 
 
-def closure_tasks(directory: Path, split: str, session: TaskSessionSpec) -> ClosureConversion:
+def closure_tasks(directory: Path, split: str, session: dict) -> ClosureConversion:
     """Validate every row, preserving all conversion failures for the caller.
 
     Consume one immutable output of the conditional-token preparer. Callers must
@@ -59,13 +60,7 @@ def closure_tasks(directory: Path, split: str, session: TaskSessionSpec) -> Clos
                     importer_revision="closure-replay-v1",
                 ),
             )
-            tasks.append(
-                LoweredTaskSpec(
-                    task=task,
-                    runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-                    session=session.model_copy(update={"task_session": STRUCTURE_CLOSURE_SESSION, "max_turns": 1}),
-                )
-            )
+            tasks.append(rollout_spec(task, {**session, "task_session": STRUCTURE_CLOSURE_SESSION, "max_turns": 1}))
         except (ValueError, KeyError, TypeError) as error:
             failures.append({"row": index, "error": str(error)})
     expected_count = sum(count for key, count in manifest["counts"].items() if key.startswith(split + "/"))

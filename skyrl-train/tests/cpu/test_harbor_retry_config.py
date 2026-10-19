@@ -1,7 +1,7 @@
 """Harbor retry policy preserves terminal results."""
 
 from omegaconf import OmegaConf
-from rolloutengine.contracts import RolloutFailure
+from rolloutengine.models import RolloutFailure
 
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 

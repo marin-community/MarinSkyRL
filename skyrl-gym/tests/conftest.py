@@ -17,15 +17,16 @@ from tempfile import TemporaryDirectory
 import pytest
 import pytest_asyncio
 import psutil
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn, MachineRuntimeSpec
 from rolloutengine.engine import RolloutEngine
 from shellbox.machine import Backend, Command, ExitReason, Result
-from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
+from skyrl_gym.rollout_specs import rollout_spec
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import CommandSemantics, Source
 
-from skyrl_gym.task_factories import session_factories
+from skyrl_gym.task_factories import episode_harnesses, session_factories
 from skyrl_gym.nemotron_tasks import NemotronTaskSession
+from rollout_support import episode_result
 
 
 @pytest.fixture
@@ -42,23 +43,9 @@ def task_lowering():
                 )
             }
         )
-        return LoweredTaskSpec(
-            task=task,
-            runtime=TaskRuntimeSpec(
-                task_machine=MachineRuntimeSpec(
-                    backend="local",
-                    network="deny",
-                    cpus=None,
-                    memory_mb=None,
-                    storage_mb=None,
-                    gpus=0,
-                    user=None,
-                    startup_timeout=None,
-                    cleanup_timeout=None,
-                ),
-                verifier_machine=None,
-            ),
-            session=TaskSessionSpec(
+        return rollout_spec(
+            task,
+            dict(
                 task_session=name,
                 max_turns=max_turns,
                 model_turn_timeout=None,
@@ -69,6 +56,17 @@ def task_lowering():
                 verifier_timeout=5,
                 cleanup_timeout=5,
                 max_total_tokens=None,
+            ),
+            task_machine=MachineRuntimeSpec(
+                backend="local",
+                network="deny",
+                cpus=None,
+                memory_mb=None,
+                storage_mb=None,
+                gpus=0,
+                user=None,
+                startup_timeout=None,
+                cleanup_timeout=None,
             ),
         )
 
@@ -308,7 +306,7 @@ async def rollout_session(task_lowering):
                 response = next(responses)
                 message = {"role": "assistant", "content": response} if isinstance(response, str) else response
                 text = message.get("content") or ""
-                prompt = (*request.prefix_token_ids, 90, 91) if request.prefix_token_ids else (10, 11)
+                prompt = (*request.continuation.served_token_ids, 90, 91) if request.continuation else (10, 11)
                 return ModelTurn(message, prompt, (20, 21), (-0.5, -0.5), "stop", text=text)
 
             task = source_task(
@@ -317,8 +315,9 @@ async def rollout_session(task_lowering):
                 {} if config is None else config,
                 Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
             )
-            engine = RolloutEngine(model, {"local": Factory()}, sessions=session_factories())
-            return await engine.run(task_lowering(task, name, max_turns=max_turns))
+            spec = task_lowering(task, name, max_turns=max_turns)
+            engine = RolloutEngine({"local": Factory()}, episode_harnesses(spec, session_factories()))
+            return episode_result(await engine.run_task(spec, model), spec)
 
         try:
             yield run

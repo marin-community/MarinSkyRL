@@ -6,7 +6,8 @@ import json
 from enum import StrEnum
 from pathlib import Path
 
-from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
+from rolloutengine.models import TaskRolloutSpec
+from skyrl_gym.rollout_specs import rollout_spec
 from skyrl_gym.source_task import source_task
 from skyrl_gym.tool_protocol_task import ReplayPrompt
 from taskcompendium.models import Source
@@ -20,8 +21,8 @@ class ReplayPartition(StrEnum):
 
 
 def replay_tasks(
-    cases_path: Path, manifest_path: Path, session: TaskSessionSpec, *, partition: ReplayPartition
-) -> list[LoweredTaskSpec]:
+    cases_path: Path, manifest_path: Path, session: dict, *, partition: ReplayPartition
+) -> list[TaskRolloutSpec]:
     """Validate replay identity and the selected task partition before lowering."""
     contents = cases_path.read_bytes()
     manifest = json.loads(manifest_path.read_text())
@@ -55,13 +56,7 @@ def replay_tasks(
                 dataset="tool-protocol-replay", revision=digest, row=task_id, importer_revision="protocol-replay-v1"
             ),
         )
-        tasks.append(
-            LoweredTaskSpec(
-                task=task,
-                runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-                session=session.model_copy(update={"task_session": "tool_protocol_replay", "max_turns": 1}),
-            )
-        )
+        tasks.append(rollout_spec(task, {**session, "task_session": "tool_protocol_replay", "max_turns": 1}))
     if not tasks or len(tasks) != manifest[count_key]:
         raise ValueError("Replay count does not match the selected partition manifest")
     return tasks
@@ -71,13 +66,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--session", type=Path, required=True, help="Explicit TaskSessionSpec JSON")
+    parser.add_argument("--session", type=Path, required=True, help="Explicit rollout limits and harness JSON")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--partition", type=ReplayPartition, choices=list(ReplayPartition), required=True)
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
-    session = TaskSessionSpec.model_validate_json(args.session.read_text())
+    session = json.loads(args.session.read_text())
     tasks = replay_tasks(args.cases, args.manifest, session, partition=args.partition)
     write_tasks(args.output, tasks)
 

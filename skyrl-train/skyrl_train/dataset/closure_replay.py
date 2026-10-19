@@ -5,14 +5,13 @@ import hashlib
 import json
 from pathlib import Path
 
-from rolloutengine.spec import TaskSessionSpec
 from skyrl_gym.closure_dataset import closure_tasks
 from skyrl_gym.closure_task import STRUCTURE_CLOSURE_SESSION
 
 from skyrl_train.dataset.tasks import write_tasks
 
 
-def prepare_closure_tasks(tokens: Path, session: TaskSessionSpec, output: Path) -> dict:
+def prepare_closure_tasks(tokens: Path, session: dict, output: Path) -> dict:
     """Write task partitions and return their status, counts, failures, and hashes."""
     if output.exists():
         raise FileExistsError(output)
@@ -45,12 +44,10 @@ def prepare_closure_tasks(tokens: Path, session: TaskSessionSpec, output: Path) 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", type=Path, required=True)
-    parser.add_argument("--session", type=Path, required=True, help="Explicit TaskSessionSpec JSON")
+    parser.add_argument("--session", type=Path, required=True, help="Explicit rollout limits and harness JSON")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    report = prepare_closure_tasks(
-        args.tokens, TaskSessionSpec.model_validate_json(args.session.read_text()), args.output
-    )
+    report = prepare_closure_tasks(args.tokens, json.loads(args.session.read_text()), args.output)
     print(json.dumps(report, indent=2))
     raise SystemExit(any(report["failures"].values()))
 

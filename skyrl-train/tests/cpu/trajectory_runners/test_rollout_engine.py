@@ -6,8 +6,9 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import pytest
 from omegaconf import OmegaConf
-from rolloutengine.contracts import GenerationLimitReached, RolloutContractError
-from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
+from rolloutengine.models import GenerationLimitReached, RolloutContractError
+from rolloutengine.models import MachineRuntimeSpec
+from skyrl_gym.rollout_specs import rollout_spec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, Command, NetworkPolicy, PackageSpec
 from taskcompendium.grader import verifyit_package
@@ -42,7 +43,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutContentPolicy,
     RolloutTask,
 )
-from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
+from skyrl_train.dataset.tasks import TASK_ROLLOUT_COLUMN
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
@@ -165,13 +166,9 @@ def lowered(task):
         startup_timeout=None,
         cleanup_timeout=None,
     )
-    return LoweredTaskSpec(
-        task=task,
-        runtime=TaskRuntimeSpec(
-            task_machine=machine if task.answer_type == AnswerType.FILE else None,
-            verifier_machine=machine if isinstance(task.grader, ScriptGrader) else None,
-        ),
-        session=TaskSessionSpec(
+    return rollout_spec(
+        task,
+        dict(
             task_session="shellbox",
             max_turns=3,
             model_turn_timeout=None,
@@ -183,6 +180,8 @@ def lowered(task):
             cleanup_timeout=5,
             max_total_tokens=None,
         ),
+        task_machine=machine if task.answer_type == AnswerType.FILE else None,
+        verifier_machine=machine if isinstance(task.grader, ScriptGrader) else None,
     )
 
 
@@ -481,7 +480,7 @@ async def test_native_reconstructed_tokens_fail_the_transport_contract():
 async def test_native_dataset_group_round_trips_through_leased_buffer(tmp_path):
     record = lowered(answer_task())
     path = tmp_path / "tasks.jsonl"
-    path.write_text(json.dumps({LOWERED_TASK_COLUMN: record.model_dump_json()}))
+    path.write_text(json.dumps({TASK_ROLLOUT_COLUMN: record.model_dump_json()}))
     dataset = TaskDataset(
         [str(path)],
         Tokenizer(),

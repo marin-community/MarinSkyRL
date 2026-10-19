@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "marin-verifyit[math,schema,reasoning-gym,judge]>=0.2.191.dev38826191626",
+    "marin-verifyit[math,schema,reasoning-gym,judge]>=0.2.202.dev39324959133",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -31,12 +31,12 @@ dependencies = [
     "loguru",
     "marin-finelog",
     "marin-finelog-server ; sys_platform == 'linux'",
-    "marin-finestore>=0.2.135.dev36906221286",
-    "marin-iris>=0.2.144.dev37540375919",
+    "marin-finestore>=0.2.202.dev39324959133",
+    "marin-iris>=0.2.202.dev39324959133",
     "marin-iris-native",
-    "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine>=0.2.191.dev38826191626",
-    "marin-shellbox[daytona,shellsim]>=0.2.191.dev38826191626",
+    "marin-rigging[secrets]>=0.2.202.dev39324959133",
+    "marin-rolloutengine>=0.2.202.dev39324959133",
+    "marin-shellbox[daytona,shellsim]>=0.2.202.dev39324959133",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -53,7 +53,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "marin-taskcompendium>=0.2.191.dev38826191626",
+    "marin-taskcompendium>=0.2.202.dev39324959133",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -183,7 +183,7 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "marin-rigging[secrets,prometheus]==0.2.191.dev38826191626",
+    "marin-rigging[secrets,prometheus]==0.2.202.dev39324959133",
     # The native server has no current macOS arm64 wheel; remote Iris clients use finelog only.
     "marin-finelog-server ; sys_platform == 'linux'",
     # Megatron Bridge declares this native extension but does not import or use it.

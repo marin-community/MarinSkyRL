@@ -1,26 +1,26 @@
-Create a task session
+Create a task episode
 =====================
 
-A task session holds task state and defines the response to each model turn.
+A task episode holds task state and defines the response to each model turn.
 The rollout engine calls the model and records the conversation and exact tokens.
 Shellbox supplies an execution machine when the task requires one.
 
 The multiplication example requires no machine. It reads a private reference answer
 and returns correction prompts until the model gives the correct answer or reaches the turn limit.
 
-Session interface
+Episode interface
 -----------------
 
-Implement the four operations in Marin's ``TaskSession`` protocol:
+Implement SkyRL's ``TaskEpisode`` protocol and register it with ``StepHarness``:
 
-- ``prepare()`` returns the initial messages and model options in ``SessionStart``.
-- ``advance(turn)`` returns a ``Transition`` with observations, a reward, and terminal state.
-- ``grade(messages)`` returns the final ``GradeResult``.
-- ``close()`` releases session resources. The engine then closes the supplied machine.
+- ``prepare()`` returns initial messages and model options in ``Prompt``.
+- ``advance(turn)`` returns a ``TaskTransition`` with observations, a reward, and terminal state.
+- ``grade(messages)`` returns SkyRL's final ``GradeResult`` when the episode ends.
+- ``close()`` releases episode resources. The engine then closes the supplied machine.
 
 A ``ModelTurn`` contains the sampled assistant message, exact token IDs, and log probabilities.
 Use its message or text for task actions. Do not replace the sampled tokens.
-A session can set ``Transition.reset_conversation`` to start the next model turn with a fresh conversation.
+A Nemotron episode can set ``TaskTransition.reset_conversation`` to start the next model turn with a fresh conversation.
 The engine replaces the active conversation and removes the preceding turns and token evidence from the rollout record.
 The next model response must preserve the new conversation's exact served prefix.
 
@@ -51,7 +51,7 @@ Pass the session class to the experiment:
    experiment = BasePPOExp(cfg, sessions={"multiply": MultiplyTaskSession})
    experiment.run()
 
-A factory accepts ``(LoweredTaskSpec, Machine | None)`` and returns a fresh session.
+A factory accepts ``(TaskRolloutSpec, Machine | None)`` and returns a fresh episode.
 The worker sends this factory map to its Ray workers.
 
 Prepare source rows
@@ -74,14 +74,14 @@ Keep the reference out of model-visible observations.
 
 ``TaskSpec.context`` holds the public conversation.
 ``TaskSpec.environment_requirements`` declares capabilities, the prebuilt image, workdir, setup commands, and environment variables.
-``LoweredTaskSpec.runtime`` selects task and verifier machines.
-``LoweredTaskSpec.session.task_session`` selects the named session factory.
-The session reads its turn limit and deadlines from ``LoweredTaskSpec.session``.
+``TaskRolloutSpec.task_machine`` and ``verifier_machine`` select machines.
+``TaskRolloutSpec.harness`` selects the named episode factory.
+The episode reads its turn limit from ``TaskRolloutSpec.limits``.
 The multiplication session does not read a source row's ``max_turns`` field.
 Set ``generator.max_turns=5`` for this example.
 An explicit ``environment.task_sessions.session.max_turns`` overrides that launch value.
 A task-specific ``environment.task_sessions.multiply.session.max_turns`` overrides the common session value.
-``TaskSpec.grader`` is a ``SessionGrader`` for a custom session.
+``TaskSpec.grader`` is a ``NoGrader`` for a custom episode that supplies its own grade.
 ``TaskSpec.answer_format`` declares the answer format.
 The session reads ``session_parameters(task)`` from ``skyrl_gym.source_task``.
 This function decodes the private ``config.json`` verifier resource:

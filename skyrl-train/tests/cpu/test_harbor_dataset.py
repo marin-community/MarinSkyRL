@@ -3,14 +3,14 @@ import json
 
 import pytest
 import pyarrow.parquet as pq
-from rolloutengine.spec import LoweredTaskSpec
+from rolloutengine.models import TaskRolloutSpec
 from skyrl_gym.source_task import source_task
-from taskcompendium.models import SessionGrader, Source, TaskSpec
+from taskcompendium.models import NoGrader, Source, TaskSpec
 from tests.cpu.task_specs import lowered_task, session_spec
 
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
 from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION, harbor_trial_task, restore_harbor_trial_task
-from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
+from skyrl_train.dataset.tasks import TASK_ROLLOUT_COLUMN
 from skyrl_train.dataset.nemotron_ultra import resolve_terminal_task, terminal_task_index
 
 
@@ -52,7 +52,7 @@ def test_original_shared_harbor_package_round_trip_keeps_private_files_off_worke
     (original / "solution/solve.sh").chmod(0o750)
     task = harbor_trial_task(original, source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"))
     task = TaskSpec.model_validate_json(task.model_dump_json())
-    assert isinstance(task.grader, SessionGrader)
+    assert isinstance(task.grader, NoGrader)
     assert not task.resources.worker and not task.resources.all
     assert [event.content for event in task.context.events] == ["original"]
     restored = tmp_path / "restored"
@@ -69,10 +69,10 @@ def test_original_shared_harbor_package_round_trip_keeps_private_files_off_worke
     )
     rows = pq.read_table(cache).to_pylist()
     assert len(rows) == 1
-    lowered = LoweredTaskSpec.model_validate_json(rows[0][LOWERED_TASK_COLUMN])
-    assert lowered.runtime.task_machine is None and lowered.runtime.verifier_machine is None
-    assert lowered.session.task_session == HARBOR_TRIAL_SESSION
-    assert isinstance(lowered.task.grader, SessionGrader)
+    lowered = TaskRolloutSpec.model_validate_json(rows[0][TASK_ROLLOUT_COLUMN])
+    assert lowered.task_machine is None and lowered.verifier_machine is None
+    assert lowered.harness == HARBOR_TRIAL_SESSION
+    assert isinstance(lowered.task.grader, NoGrader)
     cached_package = tmp_path / "cached-package"
     restore_harbor_trial_task(lowered.task, cached_package)
     assert {name: (cached_package / name).read_bytes() for name in expected} == {
