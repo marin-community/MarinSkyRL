@@ -3,6 +3,7 @@ from taskcompendium.submission import conversation_messages
 
 import json
 import shutil
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -36,6 +37,24 @@ from skyrl_train.trajectory_runners.trajectory_processing import prepare_traject
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
 from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local", [None, {}])
+async def test_worker_local_execution_is_opt_in_and_rejects_unsupported_host(monkeypatch, local):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    config = get_default_config()
+    config.environment.task_sessions.local = local
+    spec = TaskRolloutWorkerSpec.from_config(config, [])
+    if local is not None:
+        with pytest.raises(ValueError, match="Linux host with working bubblewrap"):
+            spec.build(Tokenizer(), WorkerShard(0, 1))
+        return
+    worker = spec.build(Tokenizer(), WorkerShard(0, 1))
+    try:
+        assert Backend.LOCAL not in worker.factories
+    finally:
+        await worker.shutdown()
 
 
 @pytest.mark.asyncio

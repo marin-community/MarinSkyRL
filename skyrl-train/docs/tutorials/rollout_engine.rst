@@ -80,6 +80,29 @@ and access to a Docker daemon on the rollout worker host.
 When an executable is unavailable, the worker rejects a batch whose task or verifier machine selects Docker before model requests.
 Machine-free tasks do not require those executables.
 
+Exact token prefixes
+--------------------
+
+Tasks with ``TokenizedInput`` select ``harness="token_prefix"``. Their serialized
+token IDs are authoritative; dataset filtering counts those IDs and retains the
+conversation events for display and grading. The worker serves one raw text
+continuation with ``skip_special_tokens=False``.
+
+Configure the deployed policy tokenizer explicitly:
+
+.. code-block:: yaml
+
+   environment:
+     task_sessions:
+       token_prefix:
+         tokenizer_model: owner/model
+         tokenizer_revision: 0123456789abcdef0123456789abcdef01234567
+
+Use the tokenizer source and immutable revision staged for the policy. Iris may
+replace its filesystem path during staging, so these source pins remain separate.
+A missing configuration or a task with another pin fails before inference.
+This checks deployment configuration; it does not attest the serving tokenizer.
+
 Machines and grading
 --------------------
 
@@ -136,3 +159,16 @@ Source-row conversion uses the standard entrypoint. Harbor task directories use 
 ``terminal_bench`` entrypoint. All use the same worker, with retries and group
 grading before projection. Multi-stage tasks and task-specific image builds are
 not supported. See :doc:`task_rollouts` for session and backend selection.
+
+Local task machines
+-------------------
+
+Set ``environment.task_sessions.local: {}`` to enable tasks whose machine
+backend is ``local``. The worker constructs the Shellbox local factory before
+serving rollouts, which probes whether bubblewrap can create its sandbox.
+Unsupported platforms and insufficient sandbox privileges fail worker startup.
+The backend never falls back to running commands without a sandbox.
+
+Local machines require ``memory_mb: null`` because the backend does not enforce
+memory limits. Their Python lock and read-only runtime mounts remain part of the
+TaskRolloutSpec; enabling the factory does not expose extra host directories.

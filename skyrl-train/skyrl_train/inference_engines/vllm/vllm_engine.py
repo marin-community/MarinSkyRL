@@ -1479,6 +1479,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         responses: List[str] = []
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
+        prompt_ids: list[list[int] | None] = []
         response_logprobs: Optional[List[List[float]]] = []
         student_topk_indices: List[List[List[int]]] = []
         behavior_topk_logprobs: List[List[List[float]]] = []
@@ -1496,6 +1497,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
+            prompt_ids.append(output.prompt_token_ids)
             routed_experts_rows.append(response_routes(resp.routed_experts, len(resp.token_ids)))
             _logprobs = None
             selected_ids = []
@@ -1554,6 +1556,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             response_logprobs=response_logprobs,
             prompt_logprobs=all_prompt_logprobs,
         )
+        if any(row is not None for row in prompt_ids):
+            if any(row is None for row in prompt_ids):
+                raise ValueError("vLLM omitted prompt token IDs for part of a batch")
+            result["prompt_ids"] = [list(row) for row in prompt_ids if row is not None]
         if response_top_k is not None and response_top_k > 0:
             result["student_topk_indices"] = student_topk_indices
             result["behavior_topk_logprobs"] = behavior_topk_logprobs

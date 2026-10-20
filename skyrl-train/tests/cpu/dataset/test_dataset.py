@@ -5,7 +5,15 @@ from unittest.mock import patch
 from datasets import Dataset
 from transformers import BatchEncoding, PreTrainedTokenizerFast
 from tokenizers import Tokenizer, models, pre_tokenizers
-from taskcompendium.models import AnswerType, FinalAction, FunctionDefinition, NoGrader, Source
+from taskcompendium.models import (
+    AnswerType,
+    FinalAction,
+    FunctionDefinition,
+    NoGrader,
+    Source,
+    TextMessage,
+    TokenizedInput,
+)
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
@@ -14,7 +22,7 @@ from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row
 from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.task_inputs import task_messages
 from skyrl_gym.rollout_specs import rollout_spec
-from tests.cpu.task_specs import lowered_task
+from tests.cpu.task_specs import lowered_task, text_task
 
 
 @pytest.mark.parametrize("num_workers", [1, 2])
@@ -69,6 +77,27 @@ class _StubTokenizer:
 
     def apply_chat_template(self, messages, add_generation_prompt):
         return messages if isinstance(messages, str) else "".join(message["content"] for message in messages)
+
+
+def test_tokenized_task_dataset_filters_by_authoritative_tokens_and_preserves_display(tmp_path):
+    context = TokenizedInput(
+        events=(TextMessage(role="user", content="Display context " * 100),),
+        token_ids=(1, 2, 3, 4),
+        tokenizer_model="fixture/tokenizer",
+        tokenizer_revision="a" * 40,
+    )
+    short = text_task("short-native").model_copy(update={"context": context})
+    long = text_task("long-native").model_copy(
+        update={"context": context.model_copy(update={"token_ids": tuple(range(8))})}
+    )
+    path = tmp_path / "tokenized.parquet"
+    write_tasks(path, [lowered_task(task, "token_prefix", max_turns=1) for task in (short, long)])
+    dataset = TaskDataset([str(path)], _StubTokenizer(), 6, num_workers=1)
+    (selected,) = dataset.collate_fn(list(dataset))
+    spec = selected["input"].spec
+    assert spec.task.id == "short-native"
+    assert spec.task.context.token_ids == (1, 2, 3, 4)
+    assert task_messages(spec) == [{"role": "user", "content": "Display context " * 100}]
 
 
 @pytest.fixture

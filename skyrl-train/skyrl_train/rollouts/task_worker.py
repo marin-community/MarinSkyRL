@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import shutil
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -25,6 +26,7 @@ from taskcompendium.models import NoGrader
 from verifyit.modes.grade_judge import JudgeConnection
 from rolloutengine.harness.core import Harness
 from rolloutengine.harness.external import AgentHarness
+from rolloutengine.harness.token_prefix import TokenPrefixHarness
 from rolloutengine.models import (
     GenerationLimitReached,
     GradedRollout,
@@ -127,6 +129,17 @@ class InstalledAgentWorker(Protocol):
 
 
 SKYRL_AGENT_HARNESS = "skyrl_agent"
+TOKEN_PREFIX_HARNESS = "token_prefix"
+
+
+def local_machine_factory() -> MachineFactory:
+    """Probe the host sandbox before registering local task execution."""
+    if sys.platform != "linux":
+        raise ValueError("Local task execution requires a Linux host with working bubblewrap sandboxes")
+    # The local backend's bubblewrap package is available only on Linux.
+    from shellbox.backends.local.machine import LocalMachineFactory
+
+    return LocalMachineFactory()
 
 
 async def _model_turn(
@@ -179,6 +192,12 @@ async def _model_turn(
         raise GenerationLimitReached(limit.prompt_token_ids) from limit
     if output["token_provenance"] != TokenProvenance.ENGINE:
         raise RolloutContractError("The canonical rollout engine requires exact model tokens")
+    reported_prompts = output.get("prompt_ids")
+    if request.prompt_token_ids is not None:
+        if reported_prompts is None or len(reported_prompts) != 1:
+            raise RolloutContractError("Token-prefix inference must report its served prompt token IDs")
+        if tuple(reported_prompts[0]) != request.prompt_token_ids:
+            raise RolloutContractError("Inference served a different prompt token prefix")
     logprobs = output.get("response_logprobs")
     if logprobs is not None and any(not math.isfinite(value) for value in logprobs[0]):
         raise RolloutContractError("Behavior logprobs must be finite")
@@ -189,9 +208,7 @@ async def _model_turn(
     )
     return ModelTurn(
         message=message,
-        prompt_token_ids=request.prompt_token_ids
-        if request.prompt_token_ids is not None
-        else tuple(output["prompt_ids"][0]),
+        prompt_token_ids=tuple(output["prompt_ids"][0]),
         response_token_ids=tuple(output["response_ids"][0]),
         logprobs=None if logprobs is None else tuple(logprobs[0]),
         stop_reason=output["stop_reasons"][0],
@@ -346,10 +363,12 @@ class TaskRolloutWorker:
         shutdown_timeout: float,
         installed_agents: InstalledAgentWorker | None = None,
         judge_connection: JudgeConnection | None = None,
+        token_prefix_harness: TokenPrefixHarness | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
         self.judge_connection = judge_connection
+        self.token_prefix_harness = token_prefix_harness
         self.factories = {name: OwnedMachineFactory(factory, name) for name, factory in factories.items()}
         self.active_requests: set[asyncio.Task] = set()
         self.closing = False
@@ -403,6 +422,12 @@ class TaskRolloutWorker:
         self, lowered: TaskRolloutSpec, harbor: HarborTaskSettings | None, session_id: str, phase: str
     ) -> tuple[TaskRolloutSpec, Mapping[str, Harness]]:
         harnesses = episode_harnesses(lowered, self.sessions)
+        if lowered.harness == TOKEN_PREFIX_HARNESS:
+            if self.token_prefix_harness is None:
+                raise ValueError(
+                    "Token-prefix tasks require environment.task_sessions.token_prefix tokenizer configuration"
+                )
+            harnesses[TOKEN_PREFIX_HARNESS] = self.token_prefix_harness
         if is_shell_harness(lowered.harness):
             harnesses[lowered.harness] = shell_harness(lowered.harness)
         if lowered.harness == HARBOR_TRIAL_SESSION:
@@ -628,6 +653,8 @@ class TaskRolloutWorkerSpec:
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
         inference = InferenceEngineClient(self.engines, tokenizer, client_config)
         client = DirectModelClient(inference)
+        token_prefix = self.config.environment.task_sessions.get("token_prefix")
+        token_prefix_harness = None if token_prefix is None else TokenPrefixHarness(**dict(token_prefix))
         installed_agents = None
         if self.harbor_config is not None and self.harbor_config.get("installed_agent") is not None:
             # Full Harbor is an optional dependency for installed-agent runs.
@@ -645,6 +672,8 @@ class TaskRolloutWorkerSpec:
                 int(runner_config.sampling_params.max_generate_length),
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
+        if self.config.environment.task_sessions.get("local") is not None:
+            factories[Backend.LOCAL] = local_machine_factory()
         daytona = self.config.environment.task_sessions.get("daytona")
         if daytona is not None:
             factories[Backend.DAYTONA] = DaytonaMachineFactory(
@@ -677,4 +706,5 @@ class TaskRolloutWorkerSpec:
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
             installed_agents=installed_agents,
             judge_connection=judge,
+            token_prefix_harness=token_prefix_harness,
         )

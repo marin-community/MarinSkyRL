@@ -47,6 +47,19 @@ import numpy as np
 ABORT_FINISH_REASON = "abort"
 
 
+def _reported_prompt_ids(output: InferenceEngineOutput, requested_ids: list[list[int]]) -> list[list[int]] | None:
+    """Validate optional backend evidence without substituting the requested tokens."""
+    reported_ids = output.get("prompt_ids")
+    if reported_ids is None:
+        return None
+    if len(reported_ids) != len(requested_ids):
+        raise ValueError("Inference engine prompt IDs must align with responses")
+    for reported, requested in zip(reported_ids, requested_ids, strict=True):
+        if any(type(token) is not int or token < 0 for token in reported) or reported != requested:
+            raise ValueError("Inference engine reported prompt IDs differ from the requested token prefix")
+    return reported_ids
+
+
 def _route_rows(rows: Any, response_length: int) -> np.ndarray:
     """Keep prediction-position routes aligned with the response token they produced."""
     try:
@@ -384,6 +397,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
+        reported_prompt_ids: list[list[int] | None] = [None for _ in range(n)]
         routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
@@ -396,6 +410,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         add_routed_experts = False
 
         for indices, result in zip(indices_list, results):
+            reported_ids = _reported_prompt_ids(result, [prompt_token_ids[index] for index in indices])
             policy_steps = result.get("response_policy_steps")
             selected_ids = result.get("student_topk_indices")
             selected_scores = result.get("behavior_topk_logprobs")
@@ -414,6 +429,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
+                if reported_ids is not None:
+                    reported_prompt_ids[original_idx] = reported_ids[local_idx]
                 if captured_routes is not None:
                     routed_experts[original_idx] = _route_rows(
                         captured_routes[local_idx], len(response_ids[original_idx])
@@ -441,6 +458,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
+        if any(row is not None for row in reported_prompt_ids):
+            if any(row is None for row in reported_prompt_ids):
+                raise ValueError("Inference engine omitted prompt ID evidence for part of a batch")
+            output["prompt_ids"] = [row for row in reported_prompt_ids if row is not None]
         if add_student_topk:
             if any(row is None for row in student_topk_indices) or any(row is None for row in behavior_topk_logprobs):
                 raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
@@ -529,6 +550,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_policy_steps: List[int] = []
         saw_student_topk: Optional[bool] = None
         saw_routed_experts: Optional[bool] = None
+        saw_prompt_ids: bool | None = None
+        initial_reported_prompt_ids: list[int] | None = None
         stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -573,6 +596,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_policy_steps = []
                 saw_student_topk = None
                 saw_routed_experts = None
+                saw_prompt_ids = None
+                initial_reported_prompt_ids = None
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
                 continue
@@ -582,6 +607,13 @@ class InferenceEngineClient(InferenceEngineInterface):
             new_response_ids: List[int] = partial_response["response_ids"][0]
             text_response = partial_response["responses"][0]
             stop_reason = partial_response["stop_reasons"][0]
+            reported_ids = _reported_prompt_ids(partial_response, [new_prompt_ids])
+            has_prompt_ids = reported_ids is not None
+            if saw_prompt_ids is not None and saw_prompt_ids != has_prompt_ids:
+                raise ValueError("Inference engine omitted prompt ID evidence for part of a response")
+            saw_prompt_ids = has_prompt_ids
+            if reported_ids is not None and initial_reported_prompt_ids is None:
+                initial_reported_prompt_ids = list(reported_ids[0])
             if per_prompt_sampling_params is not None and stop_reason == ABORT_FINISH_REASON:
                 raise RuntimeError("per-prompt teacher scoring cannot continue after an aborted generation")
             new_response_logprobs: Optional[List[float]] = None
@@ -638,7 +670,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         if num_turns == 1:
             final_text_response = text_response
         else:
-            final_text_response = self.tokenizer.decode(accum_response_ids, skip_special_tokens=True)
+            final_text_response = self.tokenizer.decode(
+                accum_response_ids, skip_special_tokens=sampling_params.get("skip_special_tokens", True)
+            )
 
         # Propagate prompt_logprobs from the last partial response (only meaningful
         # for teacher scoring where max_tokens=1 and num_turns=1).
@@ -651,6 +685,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
             prompt_logprobs=final_prompt_logprobs,
         )
+        if initial_reported_prompt_ids is not None:
+            output["prompt_ids"] = [initial_reported_prompt_ids]
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
