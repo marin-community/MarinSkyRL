@@ -391,10 +391,18 @@ journals, validated bounded diagnostics, and a numeric finding remain.
 
 A four-turn replay (`grpo-attempt-35-four-turn-four-groups`, Iris
 `/zack/pi-beta-verifier-grpo-gb200-20261020-r7`) again showed **zero
-oversized-frame warnings**. Seven agents completed; the eighth was cancelled
-before its first model request. The job failed without a complete physical
-batch or optimizer checkpoint. This is not evidence of a successful GRPO
-update, nor does it establish why that trial was cancelled. Harbor
+oversized-frame warnings**. Seven agents completed; the eighth had a sandbox
+file upload cancelled before its first model request. The driver logs identify
+a separate **fatal ETL error** in `_student_trajectory_row`: `Pi GRPO cannot
+assemble a continuous served token prefix`. In other words, at least one
+validated multi-turn Pi trajectory's next served prompt token IDs did not
+begin with the previous prompt and sampled response token IDs. SkyRL correctly
+refused to invent a single continuous GRPO row from discontinuous evidence.
+The job failed without a complete physical batch or optimizer checkpoint.
+The upload cancellation may be collateral to this batch failure; the logs do
+not prove who initiated that individual cancellation. There is no preemption
+signal. The tokenizer/context-rendering cause of the token-prefix mismatch
+remains to be isolated on this same path. Harbor
 `d26852ea` additionally rejects **any** non-frame stdout in capture mode
 without logging its contents; Pi JSON/diagnostic events cannot be silently
 ignored or treated as training evidence. Normal jobs must leave the
