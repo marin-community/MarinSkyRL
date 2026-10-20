@@ -480,11 +480,11 @@ def scenario_training_rows(
                 raise ValueError("Verifier GRPO must not substitute a teacher judgment")
             reward = trial.verifier_reward
         # Tool calls and observations may re-render or truncate the next
-        # served prompt. GRPO trains on each exact sampled turn instead of
-        # inventing a single continuous token stream across those boundaries.
+        # served prompt. Both the GRPO loss and the distribution teacher
+        # must see each turn's exact served IDs, not an invented prefix.
         rows = (
             [_student_row(turn, reward, trial.verifier_reward, TokenSource.STUDENT) for turn in turns]
-            if scenario is PiScenario.VERIFIER_GRPO
+            if scenario in (PiScenario.VERIFIER_GRPO, PiScenario.DISTRIBUTION)
             else [_student_trajectory_row(turns, reward, trial.verifier_reward)]
         )
     if not rows:

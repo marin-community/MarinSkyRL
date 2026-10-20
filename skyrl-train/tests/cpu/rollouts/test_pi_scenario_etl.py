@@ -14,7 +14,9 @@ from taskcompendium.grading_result import GradeResult, Outcome
 from skyrl_gym.task_records import skipped_grade
 from skyrl_gym.verification import VerificationStatus
 
+from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.distillation_adapters import build_teacher_scoring_work
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import PiRolloutData, TaskRolloutWorker, _agent_session_factory
@@ -406,6 +408,44 @@ def test_multiturn_grpo_keeps_exact_sampled_turns_without_fabricating_prefix(sec
     assert batch["is_last_step"] == [False, True]
     assert batch["rollout_logprobs"][0].tolist() == [-0.25]
     assert batch["loss_masks"] == [[1], [1]]
+
+
+def test_distribution_scores_discontinuous_tool_followup_as_two_exact_served_turns():
+    raw = trial()
+    raw["turns"][1]["executed"]["prompt_token_ids"] = [501, 502, 503]
+    result = scenario_training_rows(
+        PiScenario.DISTRIBUTION,
+        HydratedPiTrial.model_validate(raw),
+        StudentTokenizer(),
+        expected_trial_id="trial-1",
+        expected_policy_step=3,
+    )
+    batch = training_rows_to_batch(result)
+    batch["trajectory_ids"] = [TrajectoryID("task-1", 0)] * 2
+    assert batch["prompt_token_ids"] == [[20, 21], [501, 502, 503]]
+    assert batch["response_ids"] == [[777], [999]]
+    assert batch["rollout_logprobs"][0].tolist() == [-0.25]
+    assert batch["is_last_step"] == [False, True]
+    admission = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=1), rollout_logprobs_required=True
+    ).evaluate(SimpleNamespace(trajectory_batch=batch))
+    assert admission.accepted
+    work = build_teacher_scoring_work(
+        batch,
+        route_ids=("default", "default"),
+        teacher_id="teacher-a",
+        tokenizer_fingerprint="sha256:fixed-vocabulary",
+        plan_version="distribution-r1",
+        coefficient=1.0,
+        route_weights=(1.0, 1.0),
+        evidence=TeacherEvidenceKind.TOPK_DISTRIBUTION,
+        top_k=2,
+    )
+    request = work.request
+    assert request.prompt_token_ids[request.prompt_mask].tolist() == [20, 21, 501, 502, 503]
+    assert request.response_token_ids[request.response_mask].tolist() == [777, 999]
+    assert request.trajectory_ids == ("task-1_0", "task-1_0")
+    assert request.top_k == 2
 
 
 def test_multiturn_grpo_group_counts_physical_trials_not_turn_rows():

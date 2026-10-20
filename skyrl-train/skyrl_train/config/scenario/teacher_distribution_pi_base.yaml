@@ -4,6 +4,8 @@
 scenario:
   preset: teacher_distribution_pi_base
 trainer:
+  # Multi-turn Pi prompts can be re-rendered. Score each exact sampled turn.
+  step_wise_training: true
   algorithm:
     policy_loss_type: importance_sampling
     advantage_estimator: uniform

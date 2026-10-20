@@ -48,10 +48,9 @@ def validate_pi_objective_config(cfg: DictConfig) -> None:
             raise ValueError("Pi student execution requires sampled-token logprobs from the local inference engine")
     if cfg.trainer.eval_interval > 0 and cfg.generator.eval_sampling_params.logprobs != 0:
         raise ValueError("Pi student evaluation requires sampled-token logprobs from the local inference engine")
-    if bool(cfg.trainer.step_wise_training) != (preset == "verifier_grpo_base"):
-        raise ValueError(
-            "Pi verifier GRPO requires per-turn rows with step-wise training; other Pi presets require whole-trial rows"
-        )
+    step_wise = preset in ("verifier_grpo_base", "teacher_distribution_pi_base")
+    if bool(cfg.trainer.step_wise_training) != step_wise:
+        raise ValueError("Pi verifier GRPO and distribution require exact per-turn step-wise training rows")
     algorithm = cfg.trainer.algorithm
     if preset == "teacher_distribution_pi_base":
         plan = compile_distillation_plan_from_config(cfg)

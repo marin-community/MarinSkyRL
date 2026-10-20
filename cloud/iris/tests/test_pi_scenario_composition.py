@@ -156,6 +156,7 @@ def test_distribution_preset_uses_shared_topk_scoring_and_teacher_role(tmp_path)
     assert cfg.trainer.algorithm.distillation.reward_mode == "replace"
     assert cfg.generator.sampling_params.logprobs == 0
     assert cfg.generator.n_samples_per_prompt == 1
+    assert cfg.trainer.step_wise_training is True
     plan = derive_role_plan(OmegaConf.to_container(cfg, resolve=True))
     assert plan.claim("teacher:independent").execution is RoleExecution.LOCAL
     assert derive_num_nodes(plan) == 2
