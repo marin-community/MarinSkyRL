@@ -410,8 +410,20 @@ group admission; step-wise GRPO propagates its independently graded trial
 reward/advantage to its preceding sampled turns. This is a distinct ETL
 repair from the Harbor FD 3 fix: a CPU regression covers a re-rendered
 multi-turn tool context, two physical trials (four optimizer rows), group
-admission and an optimizer update. **No new GPU replay has established a
-complete graded group or checkpoint with this repair yet.** Harbor
+admission and an optimizer update. The fresh same-path GPU replay
+(`grpo-attempt-36-per-turn-four-groups`, Iris
+`/zack/pi-beta-verifier-grpo-gb200-20261020-r8`) **succeeded**: all eight Pi
+agents produced validated captures (seven two-turn, one three-turn); 17
+model calls completed; four independently graded physical trials were retained
+for step 1 (scores `0, 1, 1, 1`, each represented by two optimizer rows).
+The configured exact-physical group size was two; the job reached
+`global_step_1` and saved policy/trainer state. This proves a graded, admitted
+batch and a checkpointed optimizer update, **not** learning improvement or
+that all eight generated trials entered the update. Raw and unchecked worker
+artifacts were removed; the step-1 checkpoint, four production-validated
+training records, bounded diagnostics and content-free receipt remain under
+the fresh attempt prefix. Raw-frame dumping was disabled for this replay.
+Harbor
 `d26852ea` additionally rejects **any** non-frame stdout in capture mode
 without logging its contents; Pi JSON/diagnostic events cannot be silently
 ignored or treated as training evidence. Normal jobs must leave the
