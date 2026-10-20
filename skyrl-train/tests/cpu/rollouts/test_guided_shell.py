@@ -163,3 +163,27 @@ async def test_written_deliverables_are_detected_on_the_task_machine(numeric_tas
         assert await _outputs_written(machine, files) is written
     finally:
         await machine.close()
+
+
+@pytest.mark.asyncio
+async def test_control_settings_keep_the_rolloutengine_prompt_and_still_record_metrics(task_inputs, numeric_task):
+    config, request = task_inputs
+    lowered = lowered_task(numeric_task, backend="shellsim", max_turns=4, command_timeout=10, tool_turn_timeout=20)
+    request = replace(request, rows=(task_input(lowered),))
+    model = ConversationClient(["12"])
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(config, Tokenizer()),
+        model,
+        {"shellsim": ShellSimMachineFactory()},
+        shutdown_timeout=30,
+        guided_shell={"instructions": False, "workspace_alias": False, "max_parse_retries": 0},
+    )
+    try:
+        (rollout,) = await worker.generate(request)
+        batch = await worker.training_batch(request, [rollout])
+    finally:
+        await worker.shutdown()
+
+    assert tuple(model.requests[0]["prompts"][0]) == task_prompt(numeric_task, _shell(numeric_task), ()).messages
+    assert batch["env_metrics"] == [{"tool_calls": 0.0, "parse_retry": 0.0, "opened_input_file": 0.0}]

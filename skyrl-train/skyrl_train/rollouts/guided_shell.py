@@ -1,7 +1,10 @@
 """A Shellbox harness for workspace tasks that tells the model where its files are and keeps it on the tool loop.
 
 ``environment.task_sessions.guided_shell`` enables it in place of RolloutEngine's ``ShellHarness`` for every
-``shellbox:`` task. It keeps the shell tool, the tool loop and the grading, and changes four things:
+``shellbox:`` task. It keeps the shell tool, the tool loop and the grading, and changes four things; the settings
+``instructions``, ``workspace_alias`` (both default true) and ``max_parse_retries`` (0 disables) turn off the first
+three, so ``{instructions: false, workspace_alias: false, max_parse_retries: 0}`` is RolloutEngine's harness with
+the metrics:
 
 - Prompt. A task with a shell tool no longer ends with a separate ``Give your answer as plain text.`` user turn.
   One instruction is folded into the task message instead: the task's files are in the working directory and must
@@ -34,7 +37,7 @@ from taskcompendium.models import AssistantToolCalls, PlainText, ScriptGrader, T
 from taskcompendium.runtime.shell import BoundShellTool, resolve_shell_tool
 from taskcompendium.submission import conversation_messages, submission_instruction
 
-GUIDED_SHELL_SETTINGS = frozenset({"max_parse_retries"})
+GUIDED_SHELL_SETTINGS = frozenset({"instructions", "workspace_alias", "max_parse_retries"})
 DEFAULT_MAX_PARSE_RETRIES = 3
 WORKSPACE_ALIAS = "workspace"
 SETUP_TIMEOUT = 60.0
@@ -178,6 +181,9 @@ async def _link_workspace(machine: Machine, files: TaskFiles) -> None:
 class GuidedShellHarness(ShellHarness):
     """``ShellHarness`` with folded workspace instructions, a ``workspace`` alias, parse retries and tool metrics."""
 
+    instructions: bool = True
+    """Fold the workspace instruction into the task message; False keeps RolloutEngine's prompt."""
+    workspace_alias: bool = True
     max_parse_retries: int = DEFAULT_MAX_PARSE_RETRIES
 
     async def run(self, context: HarnessContext, session: ModelSession) -> None:
@@ -193,9 +199,11 @@ class GuidedShellHarness(ShellHarness):
             tools[shell_tool.definition.name] = _ShellToolSession(machine, shell_tool, self.command_timeout)
         files = task_files(task)
         if machine is not None and shell_tool is not None:
-            await _link_workspace(machine, files)
+            if self.workspace_alias:
+                await _link_workspace(machine, files)
         tracker = _Tracker(files, shell_tool)
-        turn = await session.start(guided_prompt(task, shell_tool, files))
+        prompt = guided_prompt(task, shell_tool, files) if self.instructions else task_prompt(task, shell_tool, ())
+        turn = await session.start(prompt)
         try:
             while True:
                 tracker.observe(turn)
@@ -239,6 +247,8 @@ def guided_shell_harness(base: ShellHarness, settings: Mapping[str, Any]) -> Gui
         command_timeout=base.command_timeout,
         shell_tool=base.shell_tool,
         tools=base.tools,
+        instructions=bool(settings.get("instructions", True)),
+        workspace_alias=bool(settings.get("workspace_alias", True)),
         max_parse_retries=int(settings.get("max_parse_retries", DEFAULT_MAX_PARSE_RETRIES)),
     )
 
