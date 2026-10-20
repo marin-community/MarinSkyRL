@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import shutil
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -129,6 +130,16 @@ class InstalledAgentWorker(Protocol):
 
 SKYRL_AGENT_HARNESS = "skyrl_agent"
 TOKEN_PREFIX_HARNESS = "token_prefix"
+
+
+def local_machine_factory() -> MachineFactory:
+    """Probe the host sandbox before registering local task execution."""
+    if sys.platform != "linux":
+        raise ValueError("Local task execution requires a Linux host with working bubblewrap sandboxes")
+    # The local backend's bubblewrap package is available only on Linux.
+    from shellbox.backends.local.machine import LocalMachineFactory
+
+    return LocalMachineFactory()
 
 
 async def _model_turn(
@@ -661,6 +672,8 @@ class TaskRolloutWorkerSpec:
                 int(runner_config.sampling_params.max_generate_length),
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
+        if self.config.environment.task_sessions.get("local") is not None:
+            factories[Backend.LOCAL] = local_machine_factory()
         daytona = self.config.environment.task_sessions.get("daytona")
         if daytona is not None:
             factories[Backend.DAYTONA] = DaytonaMachineFactory(
