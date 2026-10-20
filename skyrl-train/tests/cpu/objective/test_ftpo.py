@@ -709,6 +709,7 @@ def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs
     # unavailable repetition within an otherwise admitted prompt group.
     uids = ["a", "b", "b" if auxiliary and not task_available else "c", "d"]
     batch = trainer.convert_to_training_input(trajectory, uids, rollout_staleness=[2, 2, 2, 2])
+    assert batch.metadata["response_length"] == batch["response_mask"].shape[1]
     target_weights = batch["ftpo_weights"] if auxiliary else batch["loss_mask"]
     assert target_weights.nonzero().tolist() == [[0, 1], [1, 1], [1, 2]]
     assert batch["ftpo_repair_mask"].nonzero().tolist() == [[1, 1], [1, 2]]
