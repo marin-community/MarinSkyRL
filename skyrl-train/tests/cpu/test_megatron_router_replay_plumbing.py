@@ -177,6 +177,24 @@ def test_local_replay_targets_do_not_retain_other_layers(megatron_wrapper, packi
     assert actual.untyped_storage().nbytes() == actual.numel() * actual.element_size()
 
 
+@pytest.mark.parametrize("layer_indices", [(1,), (0, 1, 2)], ids=["local_layer", "all_layers"])
+def test_single_router_row_does_not_retain_other_tp_rows(megatron_wrapper, monkeypatch, layer_indices):
+    wrapper = megatron_wrapper(packing=True, controller=_controller(), num_experts=NUM_EXPERTS)
+    from skyrl_train.workers.megatron import megatron_model_wrapper as mmw
+
+    monkeypatch.setattr(mmw.mpu, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(mmw.mpu, "get_tensor_model_parallel_rank", lambda: 0, raising=False)
+    sequences = torch.ones((1, 2), dtype=torch.long)
+    routes = torch.arange(NUM_LAYERS * TOPK).reshape(1, 1, NUM_LAYERS, TOPK)
+    targets = wrapper._build_router_replay_targets(sequences, sequences.bool(), routes, 1, layer_indices)
+
+    storages = {}
+    for layer, actual in targets.per_layer.items():
+        torch.testing.assert_close(actual, routes[0, :, layer], rtol=0, atol=0)
+        storages[actual.untyped_storage().data_ptr()] = actual.untyped_storage().nbytes()
+    assert sum(storages.values()) == len(layer_indices) * TOPK * routes.element_size()
+
+
 def test_forward_micro_batch_closes_the_bracket_when_the_model_raises(megatron_wrapper):
     controller = _controller()
     wrapper = megatron_wrapper(packing=False, controller=controller, num_experts=NUM_EXPERTS)
