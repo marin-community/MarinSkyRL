@@ -335,6 +335,25 @@ fail-closed error and never logs stdout, fragment text, or a payload hash.
 This instrumentation applies only to **future** attempts; it cannot diagnose
 the already-failed trial retroactively.
 
+A fresh pinned replay (`grpo-attempt-31-frame-shape-four-groups`, Iris
+`/zack/pi-beta-verifier-grpo-gb200-20261020-r3`) then reproduced the failure
+with the new warning enabled. Harbor observed **three distinct oversized
+fragments** before rejecting the evidence. Its content-free shape tuples
+`(characters, embedded V2 markers, non-base64 present, previously accepted
+chunks)` were `(2984, 0, true, 22)`, `(8723, 0, true, 14)`, and
+`(16845, 0, true, 224)`. None is simply two complete numbered V2 lines
+joined together; each contains non-base64 characters, but their source is
+not yet identified. Of eight physical attempt journals, three agents
+completed, three more had two HTTP-200 model turns and
+`capture_complete(turn_count=2)` but failed on the malformed return, and two
+were cancelled. There is **no checkpointed optimizer update or complete
+admitted four-group batch**. After inspecting the bounded diagnostics we
+removed 1,893 raw/unchecked artifacts; the durable prefix keeps only eight
+content-free journals, six schema-validated sandbox diagnostics, and one
+numeric `diagnostics/frame-shapes.json` receipt. Do not repair a corrupted
+frame from diagnostic logs or claim that these warnings establish why the
+stdout line was changed.
+
 Next smoke gates, in order:
 
 1. The saved step-1 student and step-0 baseline both scored 0/8 under the old
