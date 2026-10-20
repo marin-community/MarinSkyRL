@@ -3,13 +3,19 @@
 import asyncio
 import copy
 import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import ray
+import fsspec
+from ray.util.queue import Queue
 import torch
+from torch.distributed import checkpoint
+from torch.distributed.checkpoint.api import CheckpointException
 from omegaconf import OmegaConf
 
 import skyrl_train.trainer as trainer_module
@@ -29,12 +35,14 @@ from skyrl_train.config.objective_spec import LossReduction
 from skyrl_train.objective.reduction import reduce_to_step, step_counts
 from skyrl_train.training_batch import TrainingBatchIterator
 from skyrl_train.utils.trainer_utils import ResumeMode
+from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl_train.weight_sync.expert_block.driver import SyncTimings
 from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
 from tests.cpu.util import example_dummy_config
+from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE
 
 
 @pytest.fixture
@@ -263,6 +271,94 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     assert trainer.all_metrics == {}
 
 
+@pytest.mark.slow
+@pytest.mark.parametrize("failure", ["mixed_errors", "storage_error", "timeout"])
+def test_megatron_save_settles_all_ranks_and_preserves_fatal_errors(ray_init, tmp_path, failure):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = get_default_config()
+    trainer.cfg.trainer.strategy = "megatron"
+    trainer.cfg.trainer.ckpt_path = str(tmp_path)
+    trainer.cfg.trainer.distributed.worker_collective_timeout_seconds = 1 if failure == "timeout" else 20
+    trainer.global_step = trainer.num_steps_per_epoch = trainer.total_training_steps = 1
+    trainer.all_timings = {}
+    trainer.all_metrics = {}
+    trainer._checkpoint_save_failures = 0.0
+    trainer._pending_checkpoint_upload = None
+    trainer.colocate_all = False
+    trainer.critic_model = trainer.tokenizer = None
+    entered = threading.Event()
+    completed = tmp_path / "healthy_rank_complete"
+    gates = [Queue(actor_options={"num_cpus": 0}) for _ in range(2)]
+
+    @ray.remote(num_cpus=0)
+    def save_rank(gate, error):
+        if gate is not None:
+            gate.get(timeout=30)
+        if isinstance(error, OSError):
+            destination = tmp_path / "failed_rank"
+            destination.mkdir()
+            (destination / "__0_0.distcp").mkdir()
+            checkpoint.save(
+                {"tensor": torch.arange(8)},
+                storage_writer=StreamingFsspecWriter(str(destination), filesystem=fsspec.filesystem("file")),
+            )
+        if error is not None:
+            raise CheckpointException(
+                "write",
+                {0: (OSError("storage unavailable"), traceback.StackSummary()), 1: (error, traceback.StackSummary())},
+            )
+        completed.write_text("durable")
+
+    refs = []
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        refs.append(save_rank.remote(None, OSError("storage unavailable")))
+        assert ray.wait(refs, timeout=20)[0] == refs
+        rank_error = None if failure == "storage_error" else RuntimeError("invalid rank state")
+        refs.extend([save_rank.remote(gates[0], rank_error), save_rank.remote(gates[1], None)])
+
+        def save_workers(*_args, **_kwargs):
+            entered.set()
+            return refs
+
+        trainer.policy_model = SimpleNamespace(async_run_ray_method=save_workers)
+        saving = executor.submit(asyncio.run, trainer.save_checkpoints())
+        assert entered.wait(timeout=20)
+        if failure == "timeout":
+            with pytest.raises(RuntimeError, match="did not settle"):
+                saving.result(timeout=10)
+        else:
+            with pytest.raises(TimeoutError):
+                saving.result(timeout=0.2)
+            gates[0].put(None, timeout=5)
+            assert ray.wait([refs[1]], timeout=20)[0] == [refs[1]]
+            with pytest.raises(TimeoutError):
+                saving.result(timeout=0.2)
+            gates[1].put(None, timeout=5)
+            if failure == "storage_error":
+                with pytest.raises(OSError, match="Megatron checkpoint save failed"):
+                    saving.result(timeout=20)
+            else:
+                with pytest.raises(ray.exceptions.RayTaskError, match="invalid rank state") as caught:
+                    saving.result(timeout=20)
+                assert isinstance(caught.value.cause, CheckpointException)
+                assert any(isinstance(error, RuntimeError) for error, _ in caught.value.cause.failures.values())
+    finally:
+        for gate in gates:
+            gate.put(None, timeout=5)
+        pending = ray.wait(refs, num_returns=len(refs), timeout=30)[1] if refs else []
+        for ref in pending:
+            ray.cancel(ref, force=True)
+        executor.shutdown(wait=True, cancel_futures=True)
+        for gate in gates:
+            gate.shutdown(force=True)
+        assert not pending
+
+    assert completed.read_text() == "durable"
+    assert not (tmp_path / LATEST_CHECKPOINT_FILE).exists()
+    assert trainer.all_metrics.get("trainer/checkpoint_save_failures", 0) == (1 if failure == "storage_error" else 0)
+
+
 def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
@@ -344,6 +440,7 @@ def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_
 )
 def test_step_end_exports_hf_model_only_after_checkpoint_upload_commits(checkpoint_committed, expected_events):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer._pending_megatron_save = None
     trainer._control = TrainerControl()
     trainer.eval_dataset = None
 

@@ -70,6 +70,7 @@ def test_step_end_checkpoint_and_evaluation_are_distinct_exclusive_phases():
     control = SimpleNamespace(should_save=True, should_save_hf_model=True, should_evaluate=True, reset=lambda: None)
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer._control = control
+    trainer._pending_megatron_save = None
     trainer.eval_dataset = object()
     trainer.all_timings = {}
     trainer.all_metrics = {}
@@ -80,7 +81,7 @@ def test_step_end_checkpoint_and_evaluation_are_distinct_exclusive_phases():
     trainer.eval_trajectory_runner = trainer.context
     trainer.eval_trajectory_sink = None
     trainer._inference_engines_configured = lambda: False
-    trainer.cfg = OmegaConf.create({"trainer": {}, "trajectory_runner": {"max_concurrent_tasks": 2}})
+    trainer.cfg = OmegaConf.create({"trainer": {"strategy": "other"}, "trajectory_runner": {"max_concurrent_tasks": 2}})
 
     async def callback(event, _state, current_control, **_kwargs):
         clock.advance(1)

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path
 from skyrl_train.checkpoint_exporter import CheckpointExportPlan, CheckpointExporter, RayPolicyExportWorkers
 from skyrl_train.hf_export_schema import HFUploadMode
 from skyrl_train.hf_model_io import verify_hf_model_export
@@ -109,6 +110,29 @@ def test_checkpoint_exporter_converts_only_the_policy_model(tmp_path):
     assert workers.export_path == result.export_path
     assert workers.tokenizer is tokenizer
     assert workers.closed
+
+
+def test_checkpoint_exporter_loads_only_a_committed_generation(tmp_path):
+    step_path = tmp_path / "checkpoints" / "global_step_12"
+    attempt = Path(new_attempt_path(str(step_path)))
+    (attempt / "policy").mkdir(parents=True)
+    (attempt / "policy" / "model.pt").write_bytes(b"model")
+    (attempt / "data.pt").write_bytes(b"data")
+    torch.save({"global_step": 12}, attempt / "trainer_state.pt")
+    plan = CheckpointExportPlan(12, str(step_path), str(tmp_path / "exports"), "org/model")
+    workers = FakePolicyExportWorkers()
+
+    with pytest.raises(FileNotFoundError, match="No committed checkpoint"):
+        CheckpointExporter(plan, workers, object()).run()
+    assert workers.checkpoint_path is None
+
+    commit_attempt(
+        str(step_path),
+        str(attempt),
+        required_files={"policy/model.pt", "trainer_state.pt", "data.pt"},
+    )
+    CheckpointExporter(plan, workers, object()).run()
+    assert workers.checkpoint_path == str(attempt / "policy")
 
 
 def test_checkpoint_exporter_rejects_a_mismatched_checkpoint_marker(tmp_path):

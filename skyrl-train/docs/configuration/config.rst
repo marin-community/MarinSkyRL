@@ -203,6 +203,8 @@ onto the CPU of data-parallel rank zero during save. ``dp_reshardable`` saves DP
 use it only when subsequent training will keep the same tensor, pipeline, context, and expert geometry. The loader
 reads each checkpoint's recorded format, so a run can resume an older ``fully_reshardable`` checkpoint and write
 new ``dp_reshardable`` checkpoints.
+Rank-specific RNG is restored on matching model-parallel slices. A new slice keeps common checkpoint RNG and its
+initialized CUDA RNG tracker; exact next-step replay requires the same rank layout.
 
 
 - ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Megatron sequence parallelism is also enabled by default if tensor parallel size is greater than 1.

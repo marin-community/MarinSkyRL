@@ -148,6 +148,7 @@ def stub_megatron_modules() -> None:
             )
         },
         # The checkpoint strategy module imports these at load; tests replace what they call.
+        "megatron.core.tensor_parallel": {},
         "megatron.core.dist_checkpointing": {
             "load": lambda *args, **kwargs: {},
             "save": lambda *args, **kwargs: None,
@@ -164,6 +165,10 @@ def stub_megatron_modules() -> None:
         },
         "megatron.core.dist_checkpointing.strategies": {},
         "megatron.core.dist_checkpointing.strategies.base": {},
+        "megatron.core.dist_checkpointing.strategies.checkpointable": {
+            "CheckpointableShardedTensor": type("CheckpointableShardedTensor", (), {}),
+            "LocalShardsContainer": type("LocalShardsContainer", (), {}),
+        },
         "megatron.core.dist_checkpointing.strategies.async_utils": {
             "AsyncCallsQueue": type("AsyncCallsQueue", (), {"__init__": lambda self, **kwargs: None})
         },

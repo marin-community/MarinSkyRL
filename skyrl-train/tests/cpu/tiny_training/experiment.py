@@ -152,21 +152,27 @@ def tiny_training_config(
 
 
 class JsonlTracker:
-    """Append every logged metrics record to a JSON Lines file."""
+    """Append committed tracker rows to a JSON Lines file."""
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        self.pending = {}
 
     def log(self, data, step, commit=True):
+        self.pending.update({"step": step, **data})
+        if not commit:
+            return
         with self.path.open("a") as handle:
-            handle.write(json.dumps({"step": step, **data}, default=float) + "\n")
+            handle.write(json.dumps(self.pending, default=float) + "\n")
+        self.pending.clear()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_exception):
-        pass
+        if self.pending:
+            self.log({}, step=self.pending["step"])
 
 
 def read_metrics(root: Path) -> list[dict]:

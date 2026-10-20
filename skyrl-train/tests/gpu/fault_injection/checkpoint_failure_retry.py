@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+
+import pytest
+import ray
+
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from skyrl_train.checkpoint_generation import (
+    ATTEMPTS_DIRECTORY,
+    COMMIT_FILENAME,
+    MANIFEST_FILENAME,
+    resolve_checkpoint_payload,
+)
+from skyrl_train.distributed.megatron import direct_checkpoint
+from skyrl_train.io import io
+from skyrl_train.workers.megatron.megatron_worker import MegatronPolicyWorkerBase
+from tests.gpu.fault_injection.checkpoint_config import CHECKPOINT_S3_PREFIX, checkpoint_config
+from tests.gpu.gpu_ci.test_trainer_full_checkpointing import create_minimal_trainer
+from tests.gpu.test_megatron_worker import get_test_training_batch
+from tests.gpu.utils import import_worker
+
+
+class FailingOnceMegatronPolicyWorker(MegatronPolicyWorkerBase):
+    def fail_after_next_distributed_save(self) -> int:
+        """Fail after all ranks finish DCP, before trainer generation publication."""
+        real_save = direct_checkpoint.checkpoint.save
+
+        def save_then_fail(*args, **kwargs):
+            real_save(*args, **kwargs)
+            direct_checkpoint.checkpoint.save = real_save
+            raise OSError("injected post-DCP save failure")
+
+        direct_checkpoint.checkpoint.save = save_then_fail
+        return self._rank
+
+
+def _test_root() -> str:
+    root = os.environ["CHECKPOINT_TEST_ROOT"].rstrip("/")
+    if not root.startswith(CHECKPOINT_S3_PREFIX):
+        raise ValueError("CHECKPOINT_TEST_ROOT must be a unique east-region TTL prefix")
+    return root
+
+
+def _step_path(root: str, step: int) -> str:
+    return os.path.join(root, "checkpoints", f"{GLOBAL_STEP_PREFIX}{step}")
+
+
+def _latest_path(root: str) -> str:
+    return os.path.join(root, "checkpoints", LATEST_CHECKPOINT_FILE)
+
+
+def _attempt_ids(step_path: str) -> set[str]:
+    names = io.find_files(step_path)
+    marker = f"/{ATTEMPTS_DIRECTORY}/"
+    return {name.split(marker, 1)[1].split("/", 1)[0] for name in names if marker in name}
+
+
+@pytest.mark.megatron
+def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixture) -> None:
+    root = _test_root()
+    assert not io.exists(_latest_path(root)), "Use a fresh CHECKPOINT_TEST_ROOT for the first phase"
+    cfg = checkpoint_config(root)
+    trainer = create_minimal_trainer(cfg)
+    FaultWorker = ray.remote(num_gpus=1)(FailingOnceMegatronPolicyWorker)
+    try:
+        trainer.build_models(FaultWorker, import_worker("megatron", "critic"), import_worker("megatron", "ref"))
+        batch = get_test_training_batch(batch_size=4)
+        batch.metadata["global_step"] = trainer.global_step
+        ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
+        trainer.global_step = 1
+        asyncio.run(trainer.save_checkpoints())
+
+        step_one = _step_path(root, 1)
+        previous_commit = io.read_bytes(os.path.join(step_one, COMMIT_FILENAME))
+        previous_pointer = io.read_bytes(_latest_path(root))
+        assert previous_pointer == b"1"
+        assert resolve_checkpoint_payload(step_one, verify_files=True)
+
+        batch.metadata["global_step"] = trainer.global_step
+        ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
+        trainer.global_step = 2
+        armed = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "fail_after_next_distributed_save"))
+        assert sorted(armed) == list(range(4))
+        with pytest.raises(OSError, match="checkpoint save failed"):
+            asyncio.run(trainer.save_checkpoints())
+        step_two = _step_path(root, 2)
+        assert io.read_bytes(_latest_path(root)) == previous_pointer
+        assert io.read_bytes(os.path.join(step_one, COMMIT_FILENAME)) == previous_commit
+        assert not io.exists(os.path.join(step_two, COMMIT_FILENAME))
+        with pytest.raises(FileNotFoundError):
+            resolve_checkpoint_payload(step_two, verify_files=True)
+        failed_attempts = _attempt_ids(step_two)
+        assert len(failed_attempts) == 1
+        failed_attempt = next(iter(failed_attempts))
+        assert not io.exists(os.path.join(step_two, ATTEMPTS_DIRECTORY, failed_attempt, MANIFEST_FILENAME))
+
+        asyncio.run(trainer.save_checkpoints())
+        assert io.read_bytes(_latest_path(root)) == b"2"
+        retry_commit = json.loads(io.read_bytes(os.path.join(step_two, COMMIT_FILENAME)))
+        assert retry_commit["attempt_id"] != failed_attempt
+        assert _attempt_ids(step_two) == {failed_attempt, retry_commit["attempt_id"]}
+        retry_payload = resolve_checkpoint_payload(step_two, verify_files=True)
+        assert retry_payload.endswith(retry_commit["attempt_id"])
+        assert io.read_bytes(os.path.join(step_one, COMMIT_FILENAME)) == previous_commit
+
+        evidence = {
+            "failed_attempt": failed_attempt,
+            "retry_attempt": retry_commit["attempt_id"],
+            "step_one_commit_sha256": hashlib.sha256(previous_commit).hexdigest(),
+            "step_two_commit_sha256": hashlib.sha256(
+                io.read_bytes(os.path.join(step_two, COMMIT_FILENAME))
+            ).hexdigest(),
+        }
+        io.write_bytes_atomic(os.path.join(root, "fault-evidence.json"), json.dumps(evidence, sort_keys=True).encode())
+    finally:
+        trainer.cleanup_ray_actors()
+
+
+@pytest.mark.megatron
+def test_megatron_fresh_process_resumes_retry_and_saves_next_step(ray_init_fixture) -> None:
+    root = _test_root()
+    evidence = json.loads(io.read_bytes(os.path.join(root, "fault-evidence.json")))
+    cfg = checkpoint_config(root, resume=True)
+    trainer = create_minimal_trainer(cfg)
+    try:
+        trainer.build_models(
+            import_worker("megatron", "policy"),
+            import_worker("megatron", "critic"),
+            import_worker("megatron", "ref"),
+        )
+        loaded_step, loaded_payload = trainer.load_checkpoints()
+        assert loaded_step == 2
+        assert loaded_payload.endswith(evidence["retry_attempt"])
+        assert evidence["failed_attempt"] not in loaded_payload
+
+        batch = get_test_training_batch(batch_size=4)
+        batch.metadata["global_step"] = loaded_step
+        ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
+        trainer.global_step = 3
+        asyncio.run(trainer.save_checkpoints())
+
+        assert io.read_bytes(_latest_path(root)) == b"3"
+        assert resolve_checkpoint_payload(_step_path(root, 3), verify_files=True)
+        step_one_commit = io.read_bytes(os.path.join(_step_path(root, 1), COMMIT_FILENAME))
+        step_two_commit = io.read_bytes(os.path.join(_step_path(root, 2), COMMIT_FILENAME))
+        assert hashlib.sha256(step_one_commit).hexdigest() == evidence["step_one_commit_sha256"]
+        assert hashlib.sha256(step_two_commit).hexdigest() == evidence["step_two_commit_sha256"]
+    finally:
+        trainer.cleanup_ray_actors()

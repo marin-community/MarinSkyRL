@@ -5,14 +5,8 @@ import os
 from loguru import logger
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from skyrl_train.io import io
-
-
-def extract_step_from_path(path: str) -> int:
-    basename = os.path.basename(path)
-    if basename.startswith(GLOBAL_STEP_PREFIX):
-        return int(basename.split(GLOBAL_STEP_PREFIX)[1])
-    return -1
 
 
 def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
@@ -43,3 +37,16 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
     except Exception as e:
         logger.warning(f"Failed to list checkpoint directories from {checkpoint_base_path}: {e}")
         return []
+
+
+def list_committed_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
+    """List checkpoint directories containing a valid commit or legacy payload."""
+    committed = []
+    for directory in list_checkpoint_dirs(checkpoint_base_path):
+        try:
+            resolve_checkpoint_payload(os.path.join(checkpoint_base_path, directory))
+        except (FileNotFoundError, ValueError) as error:
+            logger.warning(f"Ignoring uncommitted checkpoint directory {directory}: {error}")
+        else:
+            committed.append(directory)
+    return committed
