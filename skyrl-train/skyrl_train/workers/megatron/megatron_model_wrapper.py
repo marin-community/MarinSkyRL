@@ -288,7 +288,8 @@ class MegatronModelWrapper:
             if probe_positions is not None:
                 probe_positions = slice_sequence_parallel(probe_positions, **slice_kwargs)
         # Backward replay retains these targets; do not keep the all-layer canvas alive through views.
-        per_layer = {idx: flat[:, idx, :].to(device=device, copy=True) for idx in layer_indices}
+        copy_local_targets = len(layer_indices) < flat.shape[1] or tp_size > 1
+        per_layer = {idx: flat[:, idx, :].to(device=device, copy=copy_local_targets) for idx in layer_indices}
         return RouterReplayTargets(per_layer, mask.to(device), prediction_mask.to(device), probe_positions)
 
     def _forward_micro_batch(
