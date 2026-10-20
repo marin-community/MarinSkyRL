@@ -163,7 +163,7 @@ Numeric transport source `87f13fcd82b4677545816e0789c685d10cf051a0`, executed th
 `92d057c561b0893a3d922e42f221eb8d5b1e68fb`, passed 126 CPU adapter checks and a complete 35-update native
 Qwen qualification. All four old/new chat comparisons matched exactly at temperatures 1.0 and 0.7 through
 4096 tokens; actual causal head references had maximum error below 2e-6. The
-[integration record](https://github.com/yonromai/marin/tree/ee2abae52a384675aae56a88d9c916a6286146f0/experiments/post_training/score_centering_integration)
+[integration record](https://github.com/yonromai/marin/tree/622314c9bf1d689230fb0717dc536e0c3d907b5a/experiments/post_training/score_centering_integration)
 retains source pins, formatter edge cases, complete reports and allocation accounting.
 
 Complete matched Snowball controls used four eight-H100 learner nodes and one eight-H100 inference node on
@@ -195,9 +195,7 @@ learner GPUs remain.
 The interval-ten controlled probe model is 0.166% overhead, with 570.64 seconds between observations. Its
 paired descriptive interval is wide, -15.84% to 19.23%, and does not establish a sub-1% ceiling. A full probe
 captured 16384 engine tokens and exported 96 valid sampled positions after masks. Defaults remain interval
-ten, K128 and 32 positions per response. Real-reward asynchronous throughput and actual observation spacing
-remain pending. These serialized cycles do not establish learning benefit.
-
+ten, K128 and 32 positions per response. These serialized cycles do not establish learning benefit.
 
 Fresh asynchronous arms share the [scalar-grader repair](https://github.com/marin-community/marin/commit/5ef1e703d3bae94d510d8cf3f50d902958e10d20),
 which rejects unsupported nonscalar answers before SymPy finiteness validation. It passes 437 affected grader
@@ -206,8 +204,56 @@ replies preserves every old/new grade, including one existing inequality-format 
 edited or filtered. The repair changes no SC code, package version, other shared package tree or vLLM pin.
 Both fresh arms use the same repaired dependency lock; their timings remain separate from the controls
 above, which used the prior grader revision. The
-[qualification record](https://github.com/yonromai/marin/tree/03d5715226a493859b8995de411f0ef49da25029/experiments/post_training/score_centering_integration)
+[qualification record](https://github.com/yonromai/marin/tree/622314c9bf1d689230fb0717dc536e0c3d907b5a/experiments/post_training/score_centering_integration)
 retains the parity proof and all incomplete allocation outcomes.
+
+Both repaired-runtime asynchronous arms completed 67 applied updates on RNO at the same five-node BATCH
+allocation: three calibration, six real-reward periodic and 58 real-reward asynchronous updates. All 64
+real-reward updates per arm had nonzero gradients and none was skipped. Normal EOS, the original SFT/source
+tasks, full-batch admission, source-age limit four, 64 in-flight groups, per-update publication and the keep
+pause policy are retained. Each cost mode has two warmups and ten measured updates; probes have twenty
+measured updates after two warmups. Continuous windows include ordinary bookkeeping and exclude initial
+warmup and final context teardown. Profiling and forced synchronization stay outside these windows.
+
+| Asynchronous mode | Objects updates/h | Arrays updates/h | Objects response tokens/s | Arrays response tokens/s |
+| --- | ---: | ---: | ---: | ---: |
+| Ordinary TIS | 152.85 | 100.58 | 6067 | 7820 |
+| Capture/rescore, SC off | 111.09 | 102.95 | 3138 | 7481 |
+| TIS + SC | 118.15 | 102.54 | 3007 | 6864 |
+| Interval-ten probes | 168.22 | 116.94 | 5997 | 7285 |
+
+SC processed 128.28% more response tokens per second and 13.21% fewer updates per hour. Mean response length
+was 1882.82 tokens with arrays versus 715.79 with objects; their standard deviations were 1507.70 and 1141.90.
+Ordinary TIS lengths also differed, averaging 2186.71 versus 1116.29. Length stops affected 313/1280 candidate
+SC replies and 100/1280 baseline replies. SC cycle times ranged from 20.93–47.51 seconds with arrays and
+25.82–38.42 with objects. These stochastic workloads, changing weights, ordered modes, finite prefetch and
+one allocation per arm prevent an isolated causal training-speedup or learning-benefit claim. The
+[paired report and chart](https://github.com/yonromai/marin/tree/622314c9bf1d689230fb0717dc536e0c3d907b5a/experiments/post_training/score_centering_integration#complete-real-reward-asynchronous-comparison)
+retain every mode's lengths, rates, source ages and per-cycle variation. Loss-token rates differ from response
+rates by less than 0.006 tokens/s; minimum verifier-score coverage is 127/128 replies in both arms.
+
+SC generation-buffer wait occupied 47.34% of the candidate window versus 4.88% of baseline. Its exclusive
+mean cycle walls were 16.62 versus 1.49 seconds waiting, 2.46 versus 6.92 assembling batches, 1.92 versus
+1.84 preparing old-policy scores, 7.79 versus 7.82 training, and 6.24 versus 12.32 publishing weights. Generation,
+frontend work and publication overlap across the pipeline; a serialized saving does not translate directly
+into updates/hour. Loss-weighted source age was 2.02 versus 3.35, with maximum age four and complete consumed
+loss-token stamps. Replies spanning source versions were 61.56% versus 9.69%; per-token versions are preserved.
+
+Each probe arm consumed two observations, including one during warmup and one during measurement. Both
+sampled 128 valid positions from one four-response group per observation. Coverage of the observed batch's
+loss tokens was 0.0613%/0.0666% with arrays and 0.0985%/0.0857% with objects. Completion spacing was 399.05
+versus 295.97 seconds; observations landed at updates 46/59 and 46/60. Interval ten schedules group capture;
+asynchronous admission and source age affect when it is consumed. Both candidate observed groups had zero
+advantages, so their hypothetical loss is zero while unit-advantage corrections remain nonzero. One measured
+observation and sparse coverage do not establish a periodic overhead ceiling, parameter-gradient effect or
+learning benefit. Interval ten, K128 and 32 positions remain unchanged.
+
+All nineteen actual submissions, including failed starts, are terminal and absent. The current goal's
+allocation proxies are 244.44 H100-hours through controller terminal and 315.09 through verified provider
+absence; prior-goal accounting remains separate. No owned job, retry, Kueue workload or launcher remains on
+either cluster. Both full arms used the original BATCH priority and four-Interactive-node limit. The evidence
+record retains exact sources, raw report hashes and shutdown receipts. Benchmark scaffolding stays outside
+the product PR; #996 remains research.
 
 ## Prior Snowball qualification and cost
 
