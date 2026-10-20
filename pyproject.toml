@@ -30,7 +30,6 @@ dependencies = [
     "langdetect==1.0.9",
     "loguru",
     "marin-finelog",
-    "marin-finelog-server ; sys_platform == 'linux'",
     "marin-finestore>=0.2.202.dev39324959133",
     "marin-iris>=0.2.202.dev39324959133",
     "marin-iris-native",
@@ -184,8 +183,6 @@ no-build-isolation-package = [
 ]
 override-dependencies = [
     "marin-rigging[secrets,prometheus]==0.2.202.dev39324959133",
-    # The native server has no current macOS arm64 wheel; remote Iris clients use finelog only.
-    "marin-finelog-server ; sys_platform == 'linux'",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
