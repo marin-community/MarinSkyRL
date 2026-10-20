@@ -287,10 +287,10 @@ attributed task verifier, and a fresh job/attempt/data/output prefix:
 Each of the 14 trials recorded two completed model requests and
 `agent:run_complete` in its bounded journal; no fresh trial reported a
 malformed evidence frame. The eight-task evaluation averaged 611.75 response
-tokens (maximum 1,255) and had complete verifier coverage. Iris logs did
-contain verifier-timeout exception class names, but **all final records were
-independently scored**; those log occurrences alone do not establish a final
-verification failure or explain the previous run. We removed raw/unchecked
+tokens (maximum 1,255) and had complete verifier coverage. Iris logs printed verifier-timeout class names during startup error-policy
+classification (reproduced locally before any trial), **not** evidence that
+these particular trials timed out; all final records were independently
+scored. We removed raw/unchecked
 artifacts for each new attempt after inspecting their metrics, leaving only
 schema-checked content-free attempt journals and numeric aggregate eval
 metrics. These successful replays do **not** prove that the earlier eight-task
@@ -299,6 +299,34 @@ These are different tasks, **not** a two-member GRPO group for one prompt;
 there is no GRPO optimizer update. The 8/8 step-1 task pass rate is also
 **not a learning-improvement result** without a matched step-0 evaluation at
 these new limits.
+
+### Bounded-verbose verifier-GRPO retry (2026-10-20)
+
+The first fresh optimizer smoke (`grpo-attempt-29-verbose-four-groups`, Iris
+`/zack/pi-beta-verifier-grpo-gb200-20261020-r1`) failed before any trial:
+`train_batch_size=4` was smaller than `policy_mini_batch_size=8`. Its output
+was removed. A new immutable attempt (`grpo-attempt-30-verbose-four-groups`,
+Iris `/zack/pi-beta-verifier-grpo-gb200-20261020-r2`) passed the full local
+training-driver config preflight: four prompts, **two physical samples per
+prompt**, minibatch four, 8,192 context / 2,048 per-turn, normal GPU vLLM and
+Daytona, separate verifier, and `verbose_sandbox_diagnostics=true`. This
+option records only a validated, content-free sandbox schema—not Pi stdout.
+
+The new attempt **failed without a checkpoint or optimizer update**. Eight
+physical attempt journals appeared. Three reached `agent:run_complete`;
+another captured two successful upstream HTTP-200 turns (975 and 183 sampled
+tokens) and `capture_complete(turn_count=2)` but Harbor rejected its returned
+stdout as **`oversized fragment`** when decoding numbered in-memory evidence.
+The remaining four attempts show cancellation and task-machine download
+errors; do not count those as valid graded group members or assume the
+machine errors share one root cause. The verbose recorder finished for the
+corrupted trial, so the shape failure occurred on the path from its numbered
+stdout writes to Harbor's decoder; the exact point is not yet isolated. We
+removed 1,891 raw/unchecked artifacts, retaining only eight bounded phase
+journals and four schema-validated, content-free Pi sandbox diagnostics.
+**No complete admitted GRPO batch, nonzero advantage, or optimizer update has
+been demonstrated.** Do not retry this same attempt ID or substitute log
+content for missing in-memory evidence.
 
 Next smoke gates, in order:
 
