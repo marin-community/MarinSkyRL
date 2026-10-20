@@ -758,8 +758,21 @@ class PerformanceTrainer(RayPPOTrainer):
             "lock_sha256": hashlib.sha256((Path(__file__).resolve().parents[3] / "uv.lock").read_bytes()).hexdigest(),
             "versions": {
                 name: importlib.metadata.version(name)
-                for name in ("torch", "vllm", "megatron-core", "transformers", "marin-iris")
+                for name in (
+                    "torch",
+                    "vllm",
+                    "megatron-core",
+                    "transformers",
+                    "marin-iris",
+                    "marin-verifyit",
+                    "math-verify",
+                    "latex2sympy2-extended",
+                    "sympy",
+                )
             },
+            "grader_source_commit": json.loads(
+                importlib.metadata.distribution("marin-verifyit").read_text("direct_url.json")
+            )["vcs_info"]["commit_id"],
             "policy_parallelism": OmegaConf.to_container(self.cfg.trainer.policy.megatron_config),
             "sampling": OmegaConf.to_container(self.cfg.generator.sampling_params),
         }
