@@ -4,12 +4,24 @@ import hydra
 import ray
 from omegaconf import DictConfig
 
-from skyrl_train.dataset.tasks import TaskDataset
+from skyrl_train.dataset.tasks import TaskDataset, TaskIdDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
+
+
+def require_batch_concurrency(cfg: DictConfig) -> None:
+    """Refuse a worker pool that cannot hold one training batch of rollouts in flight at once."""
+    batch = int(cfg.trainer.train_batch_size) * int(cfg.generator.n_samples_per_prompt)
+    slots = int(cfg.trajectory_runner.max_concurrent_tasks) * int(cfg.trajectory_runner.rollout_workers.num_workers)
+    if slots < batch:
+        raise ValueError(
+            f"trajectory_runner.max_concurrent_tasks x rollout_workers.num_workers = {slots} rollout slots cannot hold "
+            f"one batch of {batch} rollouts (train_batch_size x n_samples_per_prompt); raise max_concurrent_tasks"
+        )
 
 
 class TaskCompendiumExp(BasePPOExp):
     def get_train_dataset(self):
+        require_batch_concurrency(self.cfg)
         dataset = TaskDataset(self.cfg.data.train_data, self.tokenizer, self.cfg.trainer.max_prompt_length)
         if len(dataset) < self.cfg.trainer.train_batch_size:
             raise ValueError("The task dataset is smaller than the training batch")
@@ -17,7 +29,7 @@ class TaskCompendiumExp(BasePPOExp):
 
     def get_eval_dataset(self):
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
-            return TaskDataset(self.cfg.data.val_data, self.tokenizer, self.cfg.trainer.max_prompt_length)
+            return TaskIdDataset(self.cfg.data.val_data, self.tokenizer, self.cfg.trainer.max_prompt_length)
         return None
 
 

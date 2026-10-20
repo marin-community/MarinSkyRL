@@ -53,6 +53,7 @@ class RLEntrypoint(StrEnum):
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TASKCOMPENDIUM = "taskcompendium"
+    TASKCOMPENDIUM_GENERATE = "taskcompendium_generate"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
 
@@ -63,6 +64,7 @@ RL_ENTRYPOINTS = MappingProxyType(
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.TASKCOMPENDIUM: "skyrl_train.entrypoints.taskcompendium",
+        RLEntrypoint.TASKCOMPENDIUM_GENERATE: "skyrl_train.entrypoints.taskcompendium_generate",
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
         RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
     }
@@ -94,7 +96,11 @@ def training_type_for_entrypoint(module: str, *, max_staleness_steps: int) -> Tr
     Every training entrypoint runs the rollout-buffer loop, which is synchronous at staleness 0.
     """
     entrypoint = _RL_ENTRYPOINTS_BY_MODULE.get(module)
-    if entrypoint is None or entrypoint in (RLEntrypoint.GENERATE, RLEntrypoint.TERMINAL_BENCH_GENERATE):
+    if entrypoint is None or entrypoint in (
+        RLEntrypoint.GENERATE,
+        RLEntrypoint.TASKCOMPENDIUM_GENERATE,
+        RLEntrypoint.TERMINAL_BENCH_GENERATE,
+    ):
         return None
     return TrainingType.SYNC if max_staleness_steps == 0 else TrainingType.ASYNC
 

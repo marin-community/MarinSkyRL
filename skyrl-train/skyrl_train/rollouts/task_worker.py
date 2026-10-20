@@ -58,6 +58,7 @@ from skyrl_train.rollouts.harbor_tasks import (
     shape_harbor_rollouts,
 )
 from skyrl_train.rollouts.harbor_settings import EnvironmentType
+from skyrl_train.rollouts.local_machines import local_machine_factory
 from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources
@@ -645,6 +646,9 @@ class TaskRolloutWorkerSpec:
                 int(runner_config.sampling_params.max_generate_length),
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
+        local = self.config.environment.task_sessions.get("local")
+        if local is not None:
+            factories[Backend.LOCAL] = local_machine_factory(OmegaConf.to_container(local, resolve=True))
         daytona = self.config.environment.task_sessions.get("daytona")
         if daytona is not None:
             factories[Backend.DAYTONA] = DaytonaMachineFactory(

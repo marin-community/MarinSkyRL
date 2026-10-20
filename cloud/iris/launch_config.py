@@ -117,6 +117,8 @@ class IrisConfig:
     timeout: int = 0
     target_cluster: str | None = None
     parent_cluster_config: str | None = None
+    # An Iris ContainerProfile name, e.g. CONTAINER_PROFILE_PRIVILEGED, which bubblewrap local machines need.
+    container_profile: str | None = None
 
 
 @dataclass

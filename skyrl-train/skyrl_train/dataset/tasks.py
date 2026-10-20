@@ -27,6 +27,7 @@ from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata, task_messages
 
 TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
 TASK_ROLLOUT_COLUMN = "task_rollout_spec"
+TASK_ID_COLUMN = "task_id"
 TASK_SCHEMA = pa.schema([pa.field(TASK_ROLLOUT_COLUMN, pa.string(), nullable=False)])
 PARQUET_BATCH_SIZE = 1024
 
@@ -88,11 +89,21 @@ class TaskDataset(PromptDataset):
         return inputs
 
 
+class TaskIdDataset(TaskDataset):
+    """A task dataset whose row uids are task ids, so evaluation dumps name the task each rollout ran."""
+
+    def __getitem__(self, item):
+        messages, environment, extras, _ = super().__getitem__(item)
+        return messages, environment, extras, extras[TASK_ID_COLUMN]
+
+
 def _stored_task_prompt(row: dict) -> dict:
-    prepared = task_prompt(TaskRolloutSpec.model_validate_json(row[TASK_ROLLOUT_COLUMN]))
+    lowered = TaskRolloutSpec.model_validate_json(row[TASK_ROLLOUT_COLUMN])
+    prepared = task_prompt(lowered)
     # Session-specific extras stay in the serialized task: mixed task families
     # do not share an Arrow schema. Restore them when yielding a training row.
     stored = {key: prepared[key] for key in (TASK_ROLLOUT_COLUMN, "env_class", "data_source")}
+    stored[TASK_ID_COLUMN] = lowered.task.id
     # Message fields vary across tasks. JSON preserves missing fields and nested
     # values without inferring a different Arrow struct in each map worker.
     stored["prompt"] = json.dumps(prepared["prompt"], ensure_ascii=False)

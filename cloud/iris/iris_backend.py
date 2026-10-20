@@ -247,6 +247,13 @@ def _model_path(uri: str) -> str:
     return uri
 
 
+def submission_container_profile(name: str | None) -> job_pb2.ContainerProfile:
+    """The Iris container profile a launch config names, or UNSPECIFIED (the cluster default) when it names none."""
+    if name is None:
+        return job_pb2.CONTAINER_PROFILE_UNSPECIFIED
+    return job_pb2.ContainerProfile.Value(name)
+
+
 def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNamespace:
     """Build the in-memory Iris launch state from one validated Hydra config."""
     raw = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
@@ -299,6 +306,7 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         target_cluster=iris["target_cluster"],
         parent_cluster_config=iris["parent_cluster_config"],
         wandb_entity=iris["wandb_entity"],
+        container_profile=submission_container_profile(iris["container_profile"]),
         config=config,
     )
     args.storage_paths = RLStoragePaths(
@@ -847,6 +855,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
     )
     print(f"[rl-iris] Per node:   cpu={args.cpu} memory={args.memory} disk={args.disk}", flush=True)
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
+    print(f"[rl-iris] Profile:    {job_pb2.ContainerProfile.Name(args.container_profile)}", flush=True)
     print(f"[rl-iris] Launch config:  {args.launch_config}  model={args.model_path}", flush=True)
     storage_paths = args.storage_paths
     if not _is_checkpoint_export(args):
@@ -1106,6 +1115,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
             max_retries_failure=args.max_retries,
             max_task_failures=args.max_retries,
             priority_band=priority_band,
+            container_profile=args.container_profile,
             timeout=None if args.timeout == 0 else _seconds_to_duration(args.timeout),
         )
         full_job_id = str(job.job_id)
