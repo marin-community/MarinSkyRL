@@ -12,12 +12,12 @@ an optional grading filter on teacher trace, not a sixth method. The
 its judge transport and physical group are not yet wired. The other targets
 are distribution distillation, DAgger correction, and teacher critique →
 student revision; see the [canonical five-method design](design/pi-harbor-migration.md).
-`teacher_distribution_pi_base` also composes through `scenario.preset`, but
-has **no committed GPU launch recipe yet**. It routes graded, student-only Pi
-trials to SkyRL's existing admitted-group top-K teacher scorer and sparse
-forward KL, not to Pi teacher-trace SFT. Only composition and a scripted-oracle
-CPU worker/scoring/gradient contract have passed; do not count them as a live
-vLLM teacher score or a trainer update. Its launch requires one pinned,
+`teacher_distribution_pi_base` also composes through `scenario.preset`, with
+a GPU launch recipe at `cloud/iris/configs/pi_teacher_distribution_smoke.yaml`.
+It routes graded, student-only Pi trials to SkyRL's admitted-group top-K
+teacher scorer and sparse forward KL, not to Pi teacher-trace SFT. A live
+vLLM teacher-scoring and optimizer smoke completed (recorded below); this is
+an integration gate, not a learning-quality result. Its launch requires one pinned,
 independent `teachers` entry with `topk_distribution`, exactly one route under
 `teacher_routing`, a matching student/teacher tokenizer vocabulary, and separate
 teacher resources. The typed parser compiles the teacher plan before composing
@@ -467,34 +467,63 @@ ignored or treated as training evidence. Normal jobs must leave the
 raw-frame diagnostic disabled. Only validated bounded diagnostics and a
 numeric finding were retained from the failed four-turn attempt.
 
-Next smoke gates, in order:
+### Pi distribution: independent teacher top-K GPU smoke (2026-10-20)
 
-1. Matched 8,192/2,048 evaluations now cover both checkpoints on an eight-task
-   pack (7/8 each) and a more varied 32-task pack (12/32 step 0, 13/32 step 1).
-   This does **not** establish improvement after one teacher-trace update.
-   For a quality claim, expand training beyond the original two tasks and
-   predeclare repeated-seed, disjoint, diverse held-out evaluation with the
-   same source revision, budgets and independent grading for both policies.
-2. Diagnose the in-memory stdout transport and separate-verifier timeouts
-   locally, then run a physical verifier-GRPO **baseline** group with
-   two independently sampled Pi trials per prompt, exact per-turn sampled
-   logprobs, task-verifier grades, nonzero group advantage and a checkpointed
-   GPU update. Never copy one trial to manufacture a group member.
-3. Before GPU distribution distillation, test an installed Pi student task
-   against a real independently pinned vLLM teacher oracle on CPU/small GPU,
-   with exact token alignment, masked tool context and an actual shared-trainer
-   teacher-loss update. The earlier Qwen2.5-0.5B teacher cannot score Qwen3
-   token IDs: their vocabulary fingerprints differ (`8f16caac…` versus
-   `3689317f…`). Pinned `Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e`
-   matches the Qwen3-0.6B student's vocabulary fingerprint and is an
-   independent teacher-weight source for the next **integration** test; no
-   teacher-quality claim follows from this check. Then do a one-step,
-   disjoint-teacher GPU smoke with a fresh attempt ID and output prefix; do
-   not infer quality improvement.
-4. Only after a separate post-trial judge returns identity, score and provenance
-   without overwriting verifier evidence, run a physical AI-judged GRPO group.
-   DAgger and critique→revision each need their own connected objective/source
-   and restart gates before GPU smoke tests.
+`cloud/iris/configs/pi_teacher_distribution_smoke.yaml` pins the Qwen3-0.6B
+student and a **disjoint**, independently pinned
+`Qwen/Qwen3-1.7B@70d244cc86ccca08cf5af4e1e306ecf908b1ad5e` teacher.
+Their token-ID vocabulary fingerprints match. One 1×GB200 node hosted the
+student/trainer; a second 1×GB200 node hosted the teacher vLLM engine. The
+teacher provides top-20 prompt-token distributions for sparse forward KL.
+The Pi agent remained student-only; its separate verifier grade was not
+substituted for the private teacher probabilities.
+
+The first immutable attempt (`distribution-attempt-41-topk20-two-trials`, Iris
+`/zack/pi-beta-distribution-qwen3-gb200-20261020-r1`) failed **before any
+teacher score or optimizer update**. Multi-turn Pi trials correctly became
+exact served turn rows, but teacher routing rejected duplicate row IDs within
+one physical trial (`teacher routing requires unique trajectory_ids`). A CPU
+regression now routes the per-turn rows with distinct turn indices while
+retaining their shared physical task/repetition identity for grading and
+admission. We removed 3,235 raw/unchecked objects from the failed prefix;
+only two schema-checked phase journals and a content-free failure receipt
+remain. A cancelled agent's journal is not evidence of a completed trial.
+
+The fresh retry (`distribution-attempt-42-unique-turn-topk20`, Iris
+`/zack/pi-beta-distribution-qwen3-gb200-20261020-r2`, SkyRL `d72afcb7`)
+**succeeded**. Both Pi agents completed two sampled student turns; the shared
+rollout admitted **two physical graded trials** (`reward/verifier_score_coverage=1`,
+both grades 1), represented as four exact per-turn optimizer rows. The
+independent live teacher scored **3,450** student response tokens. Trainer
+metrics reported `distillation/teacher_count=1`, top-K width 20, retained
+probability mass at least 0.9977, finite distillation loss **12.8823**,
+policy loss 0, and finite gradient norm. The trainer completed `global_step=1`,
+synced the new policy to vLLM and saved the policy/trainer checkpoint with
+its tokenizer at
+`s3://marin-us-east-02a/MarinFold/pi-scenarios-shared-smoke-20261015/output/distribution-attempt-42-unique-turn-topk20/checkpoints/global_step_1/`.
+The prefix retains that checkpoint, two validated bounded phase journals,
+and `diagnostics/topk-distillation-smoke-receipt.json` containing only model,
+task-pack and code identities plus numeric metrics; 3,239 raw/unchecked objects
+were removed. This is a **live teacher-distribution scoring and optimizer
+integration gate**. It is not evidence of better student task performance,
+multiple training steps, or restart correctness.
+
+Next gates:
+
+1. For a teacher-trace quality claim, expand training beyond the original two
+   tasks and predeclare repeated-seed, disjoint, diverse held-out evaluation.
+   The matched one-update comparisons (7/8 versus 7/8 and 12/32 versus 13/32)
+   do not establish improvement.
+2. The verifier-GRPO baseline completed one admitted four-group GPU update;
+   learning and checkpoint restart remain untested. Do not copy sampled trials
+   to fill a group.
+3. Teacher-distribution distillation now has a real top-K GPU optimizer update.
+   Evaluate its checkpoint against the same student baseline with matched task
+   packs, and test a longer run/restart before claiming improvement.
+4. AI-judged GRPO needs a separate post-trial judge with identity, score and
+   provenance, followed by an independently sampled physical group and GPU
+   update. DAgger and critique→revision each need their own connected
+   objective/source and restart gates before GPU smokes.
   For remote packed task parquets,
   put the URI in the typed launch's `inputs.train_data` as well: the training
   driver stages and extracts that input on each node before SkyRL reads it.
