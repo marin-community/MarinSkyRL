@@ -28,9 +28,11 @@ class TokenProvenance(StrEnum):
 class TrajectoryID:
     instance_id: str
     repetition_id: int
+    turn_index: int | None = None
 
     def to_string(self) -> str:
-        return f"{self.instance_id}_{self.repetition_id}"
+        physical_id = f"{self.instance_id}_{self.repetition_id}"
+        return physical_id if self.turn_index is None else f"{physical_id}_turn{self.turn_index}"
 
 
 @dataclass

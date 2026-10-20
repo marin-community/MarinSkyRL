@@ -14,10 +14,22 @@ from taskcompendium.grading_result import GradeResult, Outcome
 from skyrl_gym.task_records import skipped_grade
 from skyrl_gym.verification import VerificationStatus
 
-from marinskyrl.distillation import TeacherEvidenceKind
+from marinskyrl.distillation import (
+    DistillationObjectiveKind,
+    DistillationPlan,
+    DistillationRewardMode,
+    LocalInferenceTeacherSpec,
+    TeacherEvidenceKind,
+    TeacherModelSpec,
+    TeacherPlacement,
+    TeacherRouteSpec,
+    TeacherRoutingPlan,
+    TeacherSource,
+)
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.distillation_adapters import build_teacher_scoring_work
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.teacher_routing import PlanTeacherRouter, route_trajectory_batch
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import PiRolloutData, TaskRolloutWorker, _agent_session_factory
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
@@ -410,18 +422,42 @@ def test_multiturn_grpo_keeps_exact_sampled_turns_without_fabricating_prefix(sec
     assert batch["loss_masks"] == [[1], [1]]
 
 
-def test_distribution_scores_discontinuous_tool_followup_as_two_exact_served_turns():
+@pytest.mark.asyncio
+async def test_distribution_scores_discontinuous_tool_followup_as_two_exact_served_turns(task_inputs):
+    cfg = get_default_config().generator
+    worker = TaskRolloutWorker(
+        cfg,
+        WholeTaskProjection(cfg, StudentTokenizer()),
+        InferenceClient(),
+        {},
+        pi_scenario={"preset": "teacher_distribution_pi_base"},
+        shutdown_timeout=1,
+    )
     raw = trial()
     raw["turns"][1]["executed"]["prompt_token_ids"] = [501, 502, 503]
-    result = scenario_training_rows(
-        PiScenario.DISTRIBUTION,
-        HydratedPiTrial.model_validate(raw),
-        StudentTokenizer(),
-        expected_trial_id="trial-1",
-        expected_policy_step=3,
+    trajectory = PiCollatedTrajectory.model_validate(
+        {key: raw[key] for key in ("schema_version", "trial_id", "policy_step", "turns", "planned_executors")}
+        | {"critique_feedback": None, "critique": None}
+    ).model_dump(mode="json")
+    graded = PiRolloutData(
+        task_id="task-1",
+        messages=(),
+        prompt_token_ids=(1,),
+        response_token_ids=(999,),
+        loss_mask=(1,),
+        logprobs=(-0.25,),
+        grade=GradeResult(Outcome.GRADED, 0.0, passed=False),
+        stop_reason="stop",
+        pi_trajectory=trajectory,
+        session_id="trial-1",
     )
-    batch = training_rows_to_batch(result)
-    batch["trajectory_ids"] = [TrajectoryID("task-1", 0)] * 2
+    request = TaskRequestBatch(
+        rows=task_inputs[1].rows,
+        trajectory_ids=(TrajectoryID("task-1", 0),),
+        batch_metadata=BatchMetadata(global_step=3, training_phase="train"),
+    )
+    batch = await worker.training_batch(request, [graded])
+    assert [identity.to_string() for identity in batch["trajectory_ids"]] == ["task-1_0_turn0", "task-1_0_turn1"]
     assert batch["prompt_token_ids"] == [[20, 21], [501, 502, 503]]
     assert batch["response_ids"] == [[777], [999]]
     assert batch["rollout_logprobs"][0].tolist() == [-0.25]
@@ -430,6 +466,25 @@ def test_distribution_scores_discontinuous_tool_followup_as_two_exact_served_tur
         GroupAdvantageInvariant.exact_physical(physical_group_size=1), rollout_logprobs_required=True
     ).evaluate(SimpleNamespace(trajectory_batch=batch))
     assert admission.accepted
+    plan = DistillationPlan(
+        objective=DistillationObjectiveKind.SPARSE_FORWARD_KL,
+        coefficient=1.0,
+        reward_mode=DistillationRewardMode.REPLACE,
+        teachers=(
+            LocalInferenceTeacherSpec(
+                id="teacher-a",
+                source=TeacherSource.LOCAL_INFERENCE,
+                placement=TeacherPlacement.PINNED,
+                model=TeacherModelSpec("independent-teacher", "pinned-revision"),
+                evidence=TeacherEvidenceKind.TOPK_DISTRIBUTION,
+                backend="vllm",
+                top_k=2,
+            ),
+        ),
+        routing=TeacherRoutingPlan("distribution", "distribution-r1", (TeacherRouteSpec("default", "teacher-a", 1.0),)),
+    )
+    routed = route_trajectory_batch(batch, route_keys=("default", "default"), router=PlanTeacherRouter(plan))
+    assert routed.trajectory_ids == ("task-1_0_turn0", "task-1_0_turn1")
     work = build_teacher_scoring_work(
         batch,
         route_ids=("default", "default"),
@@ -444,7 +499,7 @@ def test_distribution_scores_discontinuous_tool_followup_as_two_exact_served_tur
     request = work.request
     assert request.prompt_token_ids[request.prompt_mask].tolist() == [20, 21, 501, 502, 503]
     assert request.response_token_ids[request.response_mask].tolist() == [777, 999]
-    assert request.trajectory_ids == ("task-1_0", "task-1_0")
+    assert request.trajectory_ids == ("task-1_0_turn0", "task-1_0_turn1")
     assert request.top_k == 2
 
 

@@ -84,6 +84,7 @@ from skyrl_train.trajectory_runners.types import (
     ROUTED_EXPERTS_KEY,
     TokenProvenance,
     TrajectoryBatch,
+    TrajectoryID,
     TaskRequestBatch,
 )
 
@@ -674,7 +675,14 @@ class TaskRolloutWorker:
                         rejected_teacher_trials += 1
                     batches.append(segment)
                     if identities is not None:
-                        expanded_ids.extend([identities[index]] * len(segment["response_ids"]))
+                        if self.pi_scenario is PiScenario.DISTRIBUTION:
+                            physical = identities[index]
+                            expanded_ids.extend(
+                                TrajectoryID(physical.instance_id, physical.repetition_id, turn_index=turn)
+                                for turn in range(len(segment["response_ids"]))
+                            )
+                        else:
+                            expanded_ids.extend([identities[index]] * len(segment["response_ids"]))
                 if any(
                     (segment["rollout_logprobs"] is None) != (batches[0]["rollout_logprobs"] is None)
                     for segment in batches
