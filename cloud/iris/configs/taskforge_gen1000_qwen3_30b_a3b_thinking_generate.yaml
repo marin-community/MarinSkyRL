@@ -1,0 +1,99 @@
+# Base-model evaluation of the Taskforge gen1000 pool on Qwen3-30B-A3B-Thinking-2507: a reference recipe for the Marin launcher.
+# 3 x 8 H100: policy 2 nodes (Megatron TP4/PP2/EP4, no reference since KL is off), rollout 1 node
+# (2 vLLM engines x TP4/EP4). Task and verifier machines run as Shellbox local (bubblewrap) machines on
+# the trainer node, which needs iris.container_profile CONTAINER_PROFILE_PRIVILEGED on CoreWeave.
+# Data: s3://marin-us-east-02a/marin/taskforge/gen1000/rl/pool-v1/ (prepared by
+# skyrl_train.dataset.taskforge); pass train and held-out parquets as data.train_data / data.val_data.
+entrypoint: taskcompendium_generate
+
+context_budget:
+  request_window_tokens: 65536
+  max_new_tokens_per_turn: 32768
+  max_turns: 20
+
+trainer:
+  strategy: megatron
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.28
+    loss_reduction: sequence_mean
+  epochs: 100
+  max_steps: 40
+  update_epochs_per_batch: 1
+  train_batch_size: 16
+  policy_mini_batch_size: 16
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  use_sample_packing: true
+  eval_interval: 5
+  eval_before_train: true
+  eval_batch_size: 1024
+  dump_eval_results: true
+  resume_mode: latest
+  logger: wandb
+  project_name: taskforge-gen1000-rl
+  policy:
+    optimizer_config:
+      lr: 1.0e-6
+      weight_decay: 0.0
+      max_grad_norm: 1.0
+    megatron_config:
+      moe_router_replay: true
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 1
+      expert_model_parallel_size: 4
+      expert_tensor_parallel_size: 1
+  placement:
+    colocate_all: false
+    policy_num_nodes: 2
+    policy_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  num_inference_engines: 2
+  inference_engine_tensor_parallel_size: 4
+  inference_engine_expert_parallel_size: 4
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 4
+  gpu_memory_utilization: 0.85
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  max_num_batched_tokens: 16384
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+  eval_sampling_params:
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+  chat_template:
+    source: file
+    name_or_path: chat_templates/qwen3_thinking_2507_acc.jinja2
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
+    enable_return_routed_experts: true
+
+environment:
+  task_sessions:
+    local: {}
+    max_verifier_workers: 64
+
+trajectory_runner:
+  # Per worker; training needs max_concurrent_tasks x num_workers >= train_batch_size x n_samples_per_prompt.
+  # Evaluation runs at most max_concurrent_tasks rollouts at once across the whole pool.
+  max_concurrent_tasks: 256
+  rollout_workers:
+    num_workers: 8
+    cpus_per_worker: 8
+
+data:
+  train_data: []
+  val_data: []

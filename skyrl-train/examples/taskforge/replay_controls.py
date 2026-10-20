@@ -147,10 +147,12 @@ def refusals(worker, specs: Sequence[TaskRolloutSpec]) -> Counter[str]:
     return counts
 
 
-async def replay(specs: Sequence[TaskRolloutSpec], concurrency: int, package_cache: str | None) -> list[dict]:
+async def replay(
+    specs: Sequence[TaskRolloutSpec], pool: Sequence[TaskRolloutSpec], concurrency: int, package_cache: str | None
+) -> tuple[list[dict], dict]:
     worker = _worker(concurrency, package_cache)
-    print("factories:", sorted(worker.factories), flush=True)
-    print("pool check:", dict(refusals(worker, specs)), flush=True)
+    summary = {"factories": sorted(worker.factories), "pool_check": dict(refusals(worker, pool))}
+    print(summary, flush=True)
     scripts = {spec.task.id: script for spec in specs if (script := control_messages(spec)) is not None}
     worker.model_client = ScriptedClient(scripts)
     replayable = [spec for spec in specs if spec.task.id in scripts]
@@ -171,7 +173,7 @@ async def replay(specs: Sequence[TaskRolloutSpec], concurrency: int, package_cac
         rollouts = await worker.generate(request)
     finally:
         await worker.shutdown()
-    elapsed = time.monotonic() - started
+    summary["replay_seconds"] = time.monotonic() - started
     records = []
     for spec, rollout in zip(replayable, rollouts, strict=True):
         records.append(
@@ -185,11 +187,11 @@ async def replay(specs: Sequence[TaskRolloutSpec], concurrency: int, package_cac
                 "reward": rollout.grade.reward,
                 "passed": rollout.grade.passed,
                 "failure": None if rollout.failure is None else str(rollout.failure)[:500],
-                "detail": str(rollout.grade.diagnostics)[:500] if rollout.grade.reward != 1.0 else None,
+                "detail": None if rollout.grade.passed else str(rollout.grade.diagnostics)[:500],
             }
         )
-    print(f"replayed {len(records)} controls in {elapsed:.1f}s", flush=True)
-    return records
+    print(f"replayed {len(records)} controls in {summary['replay_seconds']:.1f}s", flush=True)
+    return records, summary
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -216,18 +218,26 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.sample == 0
         else random.Random(args.seed).sample(candidates, min(args.sample, len(candidates)))
     )
-    records = asyncio.run(replay(chosen, args.concurrency, args.package_cache))
-    full = sum(record["reward"] == 1.0 for record in records)
-    print(f"full reward: {full}/{len(records)}", flush=True)
-    print("by machine:", dict(Counter((r["task_machine"], r["reward"] == 1.0) for r in records)), flush=True)
-    print("outcomes:", dict(Counter(r["outcome"] for r in records)), flush=True)
+    records, summary = asyncio.run(replay(chosen, specs, args.concurrency, args.package_cache))
+    full = [record["passed"] is True for record in records]
+    summary.update(
+        replayed=len(records),
+        full_solves=sum(full),
+        by_machine={
+            str(key): value for key, value in Counter((r["task_machine"], r["passed"]) for r in records).items()
+        },
+        outcomes=dict(Counter(r["outcome"] for r in records)),
+    )
+    print(json.dumps(summary, indent=2), flush=True)
     for record in records:
-        if record["reward"] != 1.0:
+        if record["passed"] is not True:
             print("NOT FULL:", json.dumps(record), flush=True)
     if args.output:
         with io.open_file(args.output, "w") as output:
             for record in records:
                 output.write(json.dumps(record) + "\n")
+        with io.open_file(args.output.removesuffix(".jsonl") + ".summary.json", "w") as output:
+            output.write(json.dumps(summary, indent=2) + "\n")
     sys.exit(0 if records else 1)
 
 
