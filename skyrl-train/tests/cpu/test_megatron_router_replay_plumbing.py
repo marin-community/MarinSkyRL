@@ -158,6 +158,25 @@ def test_short_local_route_window_matches_full_response_padding():
         torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("packing", [False, True], ids=["unpacked", "packed"])
+def test_local_replay_targets_do_not_retain_other_layers(megatron_wrapper, packing):
+    controller = _controller(recompute_enabled=True)
+    wrapper = megatron_wrapper(packing=packing, controller=controller, num_experts=NUM_EXPERTS)
+    routes = _routes()
+    micro = _micro(routes)
+
+    targets = wrapper._build_router_replay_targets(
+        micro["sequences"], micro["attention_mask"].bool(), routes, NUM_ACTIONS, (1,)
+    )
+
+    expected = torch.full((BATCH_SIZE, SEQ_LEN, TOPK), SENTINEL_EXPERT_ID, dtype=routes.dtype)
+    expected[:, SEQ_LEN - NUM_ACTIONS - 1 : SEQ_LEN - 1] = routes[:, :, 1]
+    expected = expected.reshape(-1, TOPK) if packing else expected.transpose(0, 1).reshape(-1, TOPK)
+    actual = targets.per_layer[1]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.untyped_storage().nbytes() == actual.numel() * actual.element_size()
+
+
 def test_forward_micro_batch_closes_the_bracket_when_the_model_raises(megatron_wrapper):
     controller = _controller()
     wrapper = megatron_wrapper(packing=False, controller=controller, num_experts=NUM_EXPERTS)
