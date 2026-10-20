@@ -12,6 +12,39 @@ from tests.cpu.task_specs import lowered_task, task_input, text_task
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("eval_limit,expected_peak", [(2, 2), (None, 3)])
+async def test_evaluation_session_caps_shared_work_independently_of_training(eval_limit, expected_peak):
+    cfg = get_default_config()
+    cfg.trajectory_runner.max_concurrent_tasks = 3
+    cfg.trajectory_runner.eval_max_concurrent_tasks = eval_limit
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def work():
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == expected_peak:
+            ready.set()
+        await release.wait()
+        active -= 1
+
+    runner = EvaluationLifecycle()
+    async with evaluation_session(runner, cfg, 0, object()) as pool:
+        async with asyncio.TaskGroup() as tasks:
+            for source in ("native", "sandbox", "callback"):
+                tasks.create_task(pool.run(source, work))
+            async with asyncio.timeout(5):
+                await ready.wait()
+            release.set()
+    assert peak == expected_peak
+    assert cfg.trajectory_runner.max_concurrent_tasks == 3
+    assert runner.events == ["started", "stopped"]
+
+
+@pytest.mark.asyncio
 async def test_mixed_sources_share_slots_and_replenish_before_slow_tasks_finish():
     slow = asyncio.Event()
     ready = asyncio.Event()

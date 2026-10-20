@@ -3,6 +3,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -96,6 +97,61 @@ class DummyRunner(FixtureRunner):
     async def _run(self, input_batch):
         self.seen_inputs.append(input_batch)
         return {**self.outputs[input_batch.metadata[0].uid], "trajectory_ids": list(input_batch.trajectory_ids)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_wise", [False, True])
+@pytest.mark.parametrize("scored", [False, True])
+async def test_required_coverage_persists_failed_attempts_and_accepts_valid_zero(
+    dummy_config, tmp_path, step_wise, scored
+):
+    cfg = configure_eval(dummy_config, tmp_path)
+    cfg.trainer.dump_eval_results = True
+    cfg.trainer.eval_required_score_coverage = 1.0
+    verdict = VerificationResult.verified(0.0) if scored else VerificationResult.unavailable("provider unavailable")
+    runner = DummyRunner(
+        {
+            "paired-task": {
+                "prompt_token_ids": [[101]],
+                "response_ids": [[201]],
+                "rewards": [0.0],
+                "loss_masks": [[1]],
+                "stop_reasons": ["stop"],
+                "rollout_logprobs": None,
+                "verification_results": [verdict],
+                "is_last_step": [True],
+            }
+        }
+    )
+    loader = DummyStatefulDataLoader(
+        [[{"input": task_input(lowered_task(text_task("paired-task", source="panel"))), "uid": "paired-task"}]]
+    )
+    evaluation = evaluate_step_wise if step_wise else evaluate
+    tokenizer = SimpleNamespace(decode=lambda _: "response")
+    sink = TrajectorySink(
+        parse_trajectory_retention_config(cfg.generator.trajectory_retention),
+        tokenizer,
+        publisher=InlineTrajectoryPublisher(execute_publication),
+    )
+    arguments = dict(
+        eval_dataloader=loader,
+        trajectory_runner=runner,
+        cfg=cfg,
+        global_step=0,
+        tokenizer=tokenizer,
+        trajectory_sink=sink,
+    )
+    if scored:
+        metrics = await evaluation(**arguments)
+        assert metrics["eval/all/avg_verifier_score"] == 0.0
+        assert metrics["eval/all/verifier_score_coverage"] == 1.0
+    else:
+        with pytest.raises(ValueError, match="Evaluation verifier coverage"):
+            await evaluation(**arguments)
+    record = json.loads((tmp_path / "dumped_evals/global_step_0_evals/panel.jsonl").read_text())
+    assert record["uid"] == ("eval-0-0--paired-task" if step_wise else "paired-task")
+    assert record["verification"]["status"] == ("verified" if scored else "unavailable")
+    assert record["verification"]["score"] == (0.0 if scored else None)
 
 
 def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
