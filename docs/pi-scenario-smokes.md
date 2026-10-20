@@ -377,8 +377,17 @@ assistant turns from that echo, yielding `0 assistant turns but 2 literal
 model calls`. The next Harbor pin (`b96042ce`) counts assistant turns and
 tokens from the already-validated in-memory Pi evidence instead. Its
 capture-only / concurrent-writer unit tests passed (72 Pi unit tests), and
-one opt-in installed-Pi Docker trial passed; **the new post-run correction
-has not yet passed on Daytona/GPU**.
+one opt-in installed-Pi Docker trial passed. The next GPU replay
+(`grpo-attempt-34-evidence-only-four-groups`, Iris
+`/zack/pi-beta-verifier-grpo-gb200-20261020-r6`) also had **zero oversized
+frames**; seven agent runs produced two-turn captures. One remaining agent
+requested a **third** model response at the smoke's two-turn limit; its
+pending agent/machine operation was cancelled during closure
+(`CancelledError`/`TaskMachineError`). The batch failed without an optimizer
+checkpoint. The next same-path retry must allow more turns; it must not
+replace the missing physical eighth trial with log evidence. As with the
+previous retries, unchecked S3 artifacts were deleted; only content-free
+journals, validated bounded diagnostics, and a numeric finding remain.
 
 Next smoke gates, in order:
 
