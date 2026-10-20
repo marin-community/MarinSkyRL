@@ -368,8 +368,17 @@ messages, do not enable `dump_oversized_frame` outside a controlled one-off
 trial. Harbor's subsequent producer change (`b8238080`) sends evidence over
 a dedicated inherited FD 3, suppressing Pi's JSON echo into the evidence
 stdout while retaining event validation. A local test covers a concurrent
-large JSON event and evidence frames; **the real Daytona/GPU path has not yet
-validated this change**.
+large JSON event and evidence frames. The same-path GPU replay
+(`grpo-attempt-33-fd3-four-groups`, Iris
+`/zack/pi-beta-verifier-grpo-gb200-20261020-r5`) observed **no oversized
+fragment warning**, but still failed without an update: hosted capture had
+suppressed Pi's JSON echo, while Harbor's post-run check still counted
+assistant turns from that echo, yielding `0 assistant turns but 2 literal
+model calls`. The next Harbor pin (`b96042ce`) counts assistant turns and
+tokens from the already-validated in-memory Pi evidence instead. Its
+capture-only / concurrent-writer unit tests passed (72 Pi unit tests), and
+one opt-in installed-Pi Docker trial passed; **the new post-run correction
+has not yet passed on Daytona/GPU**.
 
 Next smoke gates, in order:
 
