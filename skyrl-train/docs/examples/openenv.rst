@@ -139,7 +139,7 @@ This row selects the ``echo_env`` entry:
    }
 
 Source conversion puts selected requirements in ``TaskSpec.environment_requirements``.
-It puts the machine selection in ``LoweredTaskSpec.runtime.task_machine``.
+It puts the machine selection in ``TaskRolloutSpec.task_machine``.
 The remaining settings, including the server command, stay in the private verifier payload.
 
 Prepare and launch

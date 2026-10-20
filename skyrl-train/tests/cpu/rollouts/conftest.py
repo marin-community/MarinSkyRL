@@ -58,7 +58,7 @@ def task_inputs():
 def python_tool_task(task_inputs):
     config, request = task_inputs
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         extras={
             "extra_info": {
                 "nemotron_ultra": {

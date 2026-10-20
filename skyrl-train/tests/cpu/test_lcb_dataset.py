@@ -5,7 +5,7 @@ from skyrl_gym.source_task import session_parameters
 from taskcompendium.submission import conversation_messages
 
 from skyrl_train.dataset.tasks import source_row_task
-from tests.cpu.task_specs import session_spec
+from tests.cpu.task_specs import session_limits
 
 
 REVERSE_SOLUTION = """```python
@@ -29,7 +29,7 @@ def test_lcb_example_builder_preserves_executable_reference_tests():
         row,
         0,
         source_name=LIVECODEBENCH,
-        environment_configs={"session": session_spec().model_dump(exclude={"task_session"})},
+        environment_configs={"session": session_limits()},
     ).task
     public = conversation_messages(task.context.events)
     parameters = session_parameters(task)

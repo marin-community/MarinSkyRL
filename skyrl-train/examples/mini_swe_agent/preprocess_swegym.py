@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import datasets
-from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
+from rolloutengine.models import MachineRuntimeSpec
+from skyrl_gym.rollout_specs import rollout_spec
 from shellbox.machine import NetworkPolicy
 from taskcompendium.importers.swe import SWEInstance, swe_task
 from taskcompendium.models import CommandSemantics, EnvironmentRequirements, Source
@@ -30,8 +31,8 @@ def materialize(
     output: Path,
     *,
     images: Mapping[str, str],
-    runtime: TaskRuntimeSpec,
-    session: TaskSessionSpec,
+    machine: MachineRuntimeSpec,
+    session: dict,
 ) -> None:
     rows = datasets.load_dataset(dataset, "default", revision=revision, split=split)
     instances = (SWEInstance.model_validate(row) for row in rows)
@@ -48,7 +49,7 @@ def materialize(
         )
         for index, row in enumerate(instances)
     )
-    write_tasks(output, (LoweredTaskSpec(task=task, runtime=runtime, session=session) for task in tasks))
+    write_tasks(output, (rollout_spec(task, session, task_machine=machine, verifier_machine=machine) for task in tasks))
 
 
 def main() -> None:
@@ -76,8 +77,7 @@ def main() -> None:
         startup_timeout=600,
         cleanup_timeout=None,
     )
-    runtime = TaskRuntimeSpec(task_machine=machine, verifier_machine=machine)
-    session = TaskSessionSpec(
+    session = dict(
         task_session="shellbox",
         max_turns=args.max_turns,
         model_turn_timeout=None,
@@ -95,7 +95,7 @@ def main() -> None:
         "train",
         output / "train.parquet",
         images=images,
-        runtime=runtime,
+        machine=machine,
         session=session,
     )
     materialize(
@@ -104,7 +104,7 @@ def main() -> None:
         "test",
         output / "validation.parquet",
         images=images,
-        runtime=runtime,
+        machine=machine,
         session=session,
     )
 

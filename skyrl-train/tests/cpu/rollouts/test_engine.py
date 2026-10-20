@@ -23,7 +23,8 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.utils.harbor_errors import ErrorCategory, error_category
 from skyrl_gym.source_task import source_task
 from tests.cpu.task_specs import lowered_task, task_input
-from rolloutengine.contracts import RolloutContractError, SessionStart, Transition
+from rolloutengine.models import RolloutContractError, Prompt
+from skyrl_gym.task_records import TaskTransition
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
@@ -102,11 +103,11 @@ async def test_session_verifier_failures_reach_training_eligibility(
     task_inputs, projection_type, verification, eligible, exception_type
 ):
     def grader(turn, config, extras):
-        return Transition(done=True, reward=1.0, grade=grade_result(verification))
+        return TaskTransition(done=True, reward=1.0, grade=grade_result(verification))
 
     config, request = task_inputs
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -248,13 +249,13 @@ async def test_model_programming_failure_does_not_commit_a_partial_group(task_in
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["construct", "prepare", "advance", "grade"])
+@pytest.mark.parametrize("operation", ["construct", "prepare", "advance"])
 @pytest.mark.parametrize("error_type", [TypeError, AttributeError, AssertionError])
 async def test_task_programming_failure_does_not_commit_a_masked_group(task_inputs, operation, error_type):
     config, request = task_inputs
     config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {},
         {},
         Source(dataset="programming-failure", revision="1", row="0", importer_revision="1"),
@@ -270,17 +271,12 @@ async def test_task_programming_failure_does_not_commit_a_masked_group(task_inpu
         async def prepare(self):
             if operation == "prepare":
                 raise error_type("Invalid session implementation")
-            return SessionStart(tuple(request.public_prompts[0]), {})
+            return Prompt(tuple(request.public_prompts[0]), {})
 
         async def advance(self, turn):
             if operation == "advance":
                 raise error_type("Invalid session implementation")
-            return Transition(done=True, reward=1.0, grade=GradeResult(Outcome.GRADED, 1.0))
-
-        async def grade(self, messages, *, stop_reason, outputs):
-            if operation == "grade":
-                raise error_type("Invalid session implementation")
-            return GradeResult(Outcome.GRADED, 1.0)
+            return TaskTransition(done=True, reward=1.0, grade=GradeResult(Outcome.GRADED, 1.0))
 
         async def close(self):
             closed.append(True)
@@ -384,7 +380,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         async def prepare(self):
             if phase == "prepare":
                 raise TimeoutError("private initialization details")
-            return SessionStart(tuple(request.public_prompts[0]), {})
+            return Prompt(tuple(request.public_prompts[0]), {})
 
         async def advance(self, turn):
             self.turn += 1
@@ -392,7 +388,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
                 raise TimeoutError("private environment details")
             grade = GradeResult(Outcome.GRADED, 1.0)
             self.grades.append(grade)
-            return Transition(
+            return TaskTransition(
                 done=False, observations=({"role": "user", "content": "Continue"},), reward=1.0, grade=grade
             )
 
@@ -431,7 +427,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         "preserve_logprobs_on_timeout": preserve,
     }
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -499,7 +495,7 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
     config, request = task_inputs
     config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {"reward_spec": {"ground_truth": "12"}},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -555,13 +551,13 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
             self.grades = []
 
         async def prepare(self):
-            return SessionStart(tuple(request.public_prompts[0]), {})
+            return Prompt(tuple(request.public_prompts[0]), {})
 
         async def advance(self, turn):
             self.turn += 1
             grade = GradeResult(Outcome.GRADED, float(self.turn))
             self.grades.append(grade)
-            return Transition(
+            return TaskTransition(
                 observations=({"role": "user", "content": "Continue"},),
                 done=self.turn == 2,
                 grade=grade,
@@ -579,7 +575,7 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
 
     config, request = task_inputs
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -610,7 +606,7 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
 async def test_step_projection_preserves_served_prompts_grades_and_teacher_routes(task_inputs):
     config, request = task_inputs
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         extras={"reward_spec": {"ground_truth": "12"}},
         config={},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),

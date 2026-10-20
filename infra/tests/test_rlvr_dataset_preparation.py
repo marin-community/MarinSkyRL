@@ -5,7 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn
 from skyrl_gym.answer_tasks import grade_mcq
 
 from infra.rl_data.preparation import (

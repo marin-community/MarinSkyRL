@@ -33,10 +33,11 @@ from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_har
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
 from taskcompendium.runtime.resources import resource_bytes
-from rolloutengine.spec import LoweredTaskSpec
+from rolloutengine.models import TaskRolloutSpec
 from tests.cpu.task_specs import session_spec
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn
 from rolloutengine.engine import RolloutEngine
+from skyrl_gym.rollout_specs import shell_harness
 
 
 def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
@@ -198,8 +199,8 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
     output = materialize_harbor_tasks([asdict(source)], cache_dir=tmp_path / "cache", session=session_spec())
     dataset_path.unlink()
     tasks = [
-        LoweredTaskSpec.model_validate_json(value).task
-        for value in pq.read_table(output)["lowered_task_spec"].to_pylist()
+        TaskRolloutSpec.model_validate_json(value).task
+        for value in pq.read_table(output)["task_rollout_spec"].to_pylist()
     ]
     assert [task.context.events[0].content for task in tasks] == ["Do one", "Do three"]
     assert [task.id for task in tasks] == [
@@ -254,22 +255,20 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
 
     class Model:
         async def complete(self, request):
-            prompt = (*request.prefix_token_ids, 90) if request.prefix_token_ids else (10,)
+            prompt = (*request.continuation.served_token_ids, 90) if request.continuation else (10,)
             return ModelTurn({"role": "assistant", "content": "Done."}, prompt, (20,), (-0.5,), "stop")
 
-    engine = RolloutEngine(
-        Model().complete,
-        {"docker": Factory()},
-    )
     row = pq.read_table(output).to_pylist()[0]
-    task = LoweredTaskSpec.model_validate_json(row["lowered_task_spec"])
-    result = await engine.run(task)
+    task = TaskRolloutSpec.model_validate_json(row["task_rollout_spec"])
+    engine = RolloutEngine({"docker": Factory()}, {task.harness: shell_harness(task.harness)})
+    result = await engine.run_task(task, Model().complete)
     assert (result.grade.status, result.grade.reward) == (
         (Outcome.GRADED, 1.0) if verification else (Outcome.UNAVAILABLE, None)
     )
-    assert result.response_token_ids == (20,)
-    assert result.loss_mask == (1,)
-    assert result.logprobs == (-0.5,)
+    conversation = result.rollout.conversations[-1]
+    assert conversation.response_token_ids == (20,)
+    assert conversation.loss_mask == (1,)
+    assert conversation.logprobs == (-0.5,)
 
 
 def test_packed_materializer_reuses_reader_across_batches(tmp_path: Path) -> None:

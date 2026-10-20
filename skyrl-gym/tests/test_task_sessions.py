@@ -4,16 +4,17 @@ import json
 import hashlib
 
 import pytest
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn, TaskRolloutSpec
 from rolloutengine.engine import RolloutEngine
 from taskcompendium.grading_result import Outcome
-from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
+from skyrl_gym.rollout_specs import rollout_spec
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 
-from skyrl_gym.task_factories import session_factories
+from skyrl_gym.task_factories import episode_factories, episode_harnesses
 from skyrl_gym.task_sessions import CodeTaskSession
 from skyrl_gym.closure_dataset import closure_tasks
+from rollout_support import episode_result
 
 
 class ReplayModel:
@@ -27,7 +28,7 @@ class ReplayModel:
     async def __call__(self, request):
         self.requests.append(request)
         text = next(self.responses)
-        prompt = (*request.prefix_token_ids, 90, 91) if request.prefix_token_ids else (10, 11)
+        prompt = (*request.continuation.served_token_ids, 90, 91) if request.continuation else (10, 11)
         return ModelTurn(
             {"role": "assistant", "content": text},
             prompt,
@@ -40,7 +41,27 @@ class ReplayModel:
 
 
 def engine(model):
-    return RolloutEngine(model, {}, sessions=session_factories())
+    class Runner:
+        async def run(self, spec):
+            worker = RolloutEngine({}, episode_harnesses(spec, episode_factories()))
+            return episode_result(await worker.run_task(spec, model), spec)
+
+    return Runner()
+
+
+def session_settings(name):
+    return dict(
+        task_session=name,
+        max_turns=3,
+        model_turn_timeout=None,
+        command_timeout=1,
+        tool_turn_timeout=5,
+        total_turn_timeout=None,
+        attempt_timeout=None,
+        verifier_timeout=5,
+        cleanup_timeout=5,
+        max_total_tokens=None,
+    )
 
 
 def task(name, extras, config=None):
@@ -50,22 +71,7 @@ def task(name, extras, config=None):
         {} if config is None else config,
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    return LoweredTaskSpec(
-        task=specification,
-        runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-        session=TaskSessionSpec(
-            task_session=name,
-            max_turns=3,
-            model_turn_timeout=None,
-            command_timeout=1,
-            tool_turn_timeout=5,
-            total_turn_timeout=None,
-            attempt_timeout=None,
-            verifier_timeout=5,
-            cleanup_timeout=5,
-            max_total_tokens=None,
-        ),
-    )
+    return rollout_spec(specification, session_settings(name))
 
 
 def test_closure_conversion_reports_all_invalid_rows_and_preserves_valid_task(tmp_path):
@@ -96,12 +102,12 @@ def test_closure_conversion_reports_all_invalid_rows_and_preserves_valid_task(tm
             }
         )
     )
-    result = closure_tasks(tmp_path, "train", task("structure_closure", {}).session)
+    result = closure_tasks(tmp_path, "train", session_settings("structure_closure"))
     assert len(result.tasks) == 1
     assert [failure["row"] for failure in result.failures] == [1, 2]
-    restored = LoweredTaskSpec.model_validate_json(result.tasks[0].model_dump_json())
+    restored = TaskRolloutSpec.model_validate_json(result.tasks[0].model_dump_json())
     assert restored.task.source.row == "one"
-    assert restored.runtime.task_machine is None
+    assert restored.task_machine is None
 
 
 @pytest.mark.asyncio
@@ -138,7 +144,7 @@ async def test_closure_replay_scores_exact_tokens_and_preserves_private_referenc
             "expected": expected,
         },
     )
-    specification = LoweredTaskSpec.model_validate_json(specification.model_dump_json())
+    specification = TaskRolloutSpec.model_validate_json(specification.model_dump_json())
 
     async def model(request):
         assert request.prompt_token_ids == prompt_ids
@@ -171,7 +177,7 @@ async def test_closure_replay_scores_exact_tokens_and_preserves_private_referenc
 async def test_answer_task_json_preserves_private_grade_and_training_reward(
     name, extras, response, native_reward, training_reward
 ):
-    specification = LoweredTaskSpec.model_validate_json(task(name, extras).model_dump_json())
+    specification = TaskRolloutSpec.model_validate_json(task(name, extras).model_dump_json())
     model = ReplayModel([response])
     rollout = await engine(model).run(specification)
     assert (rollout.grade.status, rollout.grade.reward) == (Outcome.GRADED, native_reward)

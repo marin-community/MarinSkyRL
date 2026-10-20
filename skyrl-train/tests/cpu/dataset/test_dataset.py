@@ -13,6 +13,7 @@ from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION, harbor_trial
 from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row_task, write_tasks
 from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.task_inputs import task_messages
+from skyrl_gym.rollout_specs import rollout_spec
 from tests.cpu.task_specs import lowered_task
 
 
@@ -50,18 +51,11 @@ def test_native_task_filter_counts_tool_definitions(tmp_path, num_workers):
                 ),
             }
         )
-        tasks.append(
-            base.model_copy(
-                update={
-                    "task": task,
-                    "session": base.session.model_copy(update={"task_session": "shellbox"}),
-                }
-            )
-        )
+        tasks.append(rollout_spec(task, {**base.limits.model_dump(), "task_session": "shellbox", "command_timeout": 1}))
     path = tmp_path / "tools.parquet"
     write_tasks(path, tasks)
     dataset = TaskDataset([str(path)], tokenizer, 30, num_workers=num_workers)
-    admitted = [row["input"].lowered.task.id for row in dataset.collate_fn(list(dataset))]
+    admitted = [row["input"].spec.task.id for row in dataset.collate_fn(list(dataset))]
     assert admitted == ["short"]
 
 
@@ -119,12 +113,12 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
     assert dataset is not None
     assert len(dataset) == 2
     rows = dataset.collate_fn([dataset[0], dataset[1]])
-    assert [task_messages(row["input"].lowered) for row in rows] == [
+    assert [task_messages(row["input"].spec) for row in rows] == [
         [{"role": "user", "content": "short prompt"}],
         [{"role": "user", "content": "a" * 120}],
     ]
     assert [row["uid"] for row in rows] == ["0", "1"]
-    tasks = [row["input"].lowered.task for row in rows]
+    tasks = [row["input"].spec.task for row in rows]
     assert [task.source.row for task in tasks] == ["0", "1"]
     assert all(row["input"].metadata.metric_class == "gsm8k" for row in rows)
 
@@ -156,8 +150,8 @@ def test_source_tasks_preserve_row_indices_and_source_labels_after_filtering(
         num_workers=num_workers,
     )
     prepared = dataset.collate_fn([dataset[index] for index in range(len(dataset))])
-    assert [task_messages(row["input"].lowered) for row in prepared] == [rows[0]["prompt"], rows[2]["prompt"]]
-    tasks = [row["input"].lowered.task for row in prepared]
+    assert [task_messages(row["input"].spec) for row in prepared] == [rows[0]["prompt"], rows[2]["prompt"]]
+    tasks = [row["input"].spec.task for row in prepared]
     assert [task.source.row for task in tasks] == ["0", "2"]
     assert [row["input"].metadata.data_source for row in prepared] == [expected_source, expected_source]
     assert dataset.dataframe.cache_files == []
@@ -225,7 +219,7 @@ def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_work
         task = inputs[index]["input"]
         assert task.metadata.metric_class == source["env_class"]
         assert inputs[index]["uid"] == str(index)
-        assert task.lowered == tasks[index]
+        assert task.spec == tasks[index]
         assert task.metadata.teacher_route == source.get("teacher_route")
 
 
@@ -260,7 +254,7 @@ def test_mixed_original_harbor_and_source_tasks_collate_without_source_metadata_
 
     inputs = dataset.collate_fn(list(dataset))
 
-    assert [row["input"].lowered for row in inputs] == tasks
+    assert [row["input"].spec for row in inputs] == tasks
     by_metric_class = {row["input"].metadata.metric_class: row["input"] for row in inputs}
     assert by_metric_class["gsm8k"].metadata.teacher_route == "math"
     assert by_metric_class[HARBOR_TRIAL_SESSION].metadata.teacher_route is None

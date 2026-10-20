@@ -11,7 +11,9 @@ import psutil
 import pytest
 import pytest_asyncio
 from rolloutengine.engine import RolloutEngine
-from rolloutengine.spec import LoweredTaskSpec
+from rolloutengine.models import TaskRolloutSpec
+from skyrl_gym.task_factories import episode_harnesses
+from rollout_support import episode_result
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 
@@ -58,7 +60,7 @@ HTTPServer(('127.0.0.1', port), Handler).serve_forever()
 @dataclass(frozen=True)
 class OpenEnvCase:
     session: OpenEnvTaskSession
-    task: LoweredTaskSpec
+    task: TaskRolloutSpec
     log: Path
 
 
@@ -173,11 +175,10 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
         return model_turn("<action>done</action>")
 
     engine = RolloutEngine(
-        factories={"local": Factory()},
-        model=model,
-        sessions={"openenv": lambda _context: case.session},
+        {"local": Factory()},
+        episode_harnesses(case.task, {"openenv": lambda _spec, _machine: case.session}),
     )
-    rollout = await engine.run(case.task)
+    rollout = episode_result(await engine.run_task(case.task, model), case.task)
     assert rollout.grade.reward == 0.25
     assert rollout.response_token_ids == (20, 21)
     assert rollout.loss_mask == (1, 1)

@@ -7,9 +7,11 @@ from dataclasses import replace
 
 import pytest
 import pytest_asyncio
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn, MachineRuntimeSpec
 from rolloutengine.engine import RolloutEngine
-from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
+from rolloutengine.harness.shell import ShellHarness
+from skyrl_gym.rollout_specs import rollout_spec
+from rollout_support import episode_result
 from shellbox.backends.docker.machine import DockerMachineFactory, docker
 from shellbox.machine import Backend, Command, DockerImage, ExitReason, MachineSpec
 from taskcompendium.grading_result import Outcome
@@ -184,7 +186,7 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
                     }
                 ],
             }
-        prompt = (*request.prefix_token_ids, 90, 91) if request.prefix_token_ids else (10, 11)
+        prompt = (*request.continuation.served_token_ids, 90, 91) if request.continuation else (10, 11)
         return ModelTurn(message, prompt, (20 + index,), (-0.5,), "stop")
 
     requirements = EnvironmentRequirements(
@@ -231,10 +233,9 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
         startup_timeout=60,
         cleanup_timeout=30,
     )
-    lowered = LoweredTaskSpec(
-        task=task,
-        runtime=TaskRuntimeSpec(task_machine=runtime, verifier_machine=runtime),
-        session=TaskSessionSpec(
+    lowered = rollout_spec(
+        task,
+        dict(
             task_session="shellbox",
             max_turns=3,
             model_turn_timeout=5,
@@ -246,8 +247,15 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
             cleanup_timeout=30,
             max_total_tokens=None,
         ),
+        task_machine=runtime,
+        verifier_machine=runtime,
     )
-    record = await RolloutEngine(complete, {"docker": Factory()}).run(lowered)
+    record = episode_result(
+        await RolloutEngine({"docker": Factory()}, {lowered.harness: ShellHarness(command_timeout=1)}).run_task(
+            lowered, complete
+        ),
+        lowered,
+    )
     assert (record.grade.status, record.grade.reward) == (Outcome.GRADED, reward)
     assert record.failure is None
     assert json.loads(requests[1].messages[-1]["content"])["reason"] == first_reason

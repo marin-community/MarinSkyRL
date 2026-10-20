@@ -3,8 +3,8 @@
 import json
 
 import pytest
-from rolloutengine.contracts import ModelTurn
-from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
+from rolloutengine.models import ModelTurn
+from skyrl_gym.rollout_specs import rollout_spec
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import Source
 
@@ -38,10 +38,9 @@ def session():
         Source(dataset="ipi", revision="1", row="0", importer_revision="1"),
     )
     return NemotronTaskSession(
-        LoweredTaskSpec(
-            task=task,
-            runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-            session=TaskSessionSpec(
+        rollout_spec(
+            task,
+            dict(
                 task_session="nemotron_ultra",
                 max_turns=50,
                 model_turn_timeout=None,

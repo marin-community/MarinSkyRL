@@ -3,13 +3,11 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from omegaconf import OmegaConf
-from rolloutengine.contracts import (
+from skyrl_train.rollouts.training_record import TrainingRollout, TrainingStep, TrainingTransition
+from rolloutengine.models import (
     ModelTurn,
     RolloutContractError,
-    RolloutData,
     RolloutFailure,
-    RolloutStep,
-    Transition,
 )
 from taskcompendium.grading_result import GradeResult, Outcome
 
@@ -39,14 +37,14 @@ def rollout(response_ids, reward, *, metadata=None, metrics=None, grade=None, to
         metadata=metadata or {},
     )
     grade = grade or GradeResult(Outcome.GRADED, score)
-    transition = Transition(
+    transition = TrainingTransition(
         done=True,
         reward=score,
         token_rewards=tuple(reward) if isinstance(reward, list) else None,
         token_credit=token_credit,
         grade=grade,
     )
-    return RolloutData(
+    return TrainingRollout(
         task_id="task",
         messages=(turn.message,),
         prompt_token_ids=turn.prompt_token_ids,
@@ -55,7 +53,7 @@ def rollout(response_ids, reward, *, metadata=None, metrics=None, grade=None, to
         logprobs=turn.logprobs,
         grade=grade,
         stop_reason="stop",
-        steps=(RolloutStep(turn, transition, len(response_ids) - 1, (turn.message,)),),
+        steps=(TrainingStep(turn, transition, len(response_ids) - 1, (turn.message,)),),
         metrics=metrics or {},
     )
 

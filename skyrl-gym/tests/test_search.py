@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from rolloutengine.contracts import RolloutInterrupted, RolloutOperation
+from rolloutengine.models import GradedRolloutInterrupted, RolloutOperation
 
 from skyrl_gym.envs.search.utils import em_check, extract_solution
 
@@ -96,7 +96,7 @@ async def test_search_task_preserves_exact_answer_normalization(rollout_session,
 @pytest.mark.asyncio
 async def test_search_rejects_a_response_beyond_its_stop_tag(rollout_session, retrieval_service):
     url, requests = retrieval_service
-    with pytest.raises(RolloutInterrupted) as failure:
+    with pytest.raises(GradedRolloutInterrupted) as failure:
         await rollout_session(
             "search",
             ["<search>query</search>more text"],

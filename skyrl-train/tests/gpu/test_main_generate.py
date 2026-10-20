@@ -22,10 +22,10 @@ def create_dataset(tmp_path, model_name: str):
     )
     row = input_batch.rows[0]
     data = {
-        "prompt": conversation_messages(row.lowered.task.context.events),
-        "env_class": row.lowered.session.task_session,
+        "prompt": conversation_messages(row.spec.task.context.events),
+        "env_class": row.spec.session.task_session,
         "data_source": "test",
-        **session_parameters(row.lowered.task).extras,
+        **session_parameters(row.spec.task).extras,
     }
     path = tmp_path / "data.json"
     with open(path, "w") as f:

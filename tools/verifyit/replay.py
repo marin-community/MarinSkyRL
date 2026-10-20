@@ -6,7 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rolloutengine.contracts import ModelTurn
+from rolloutengine.models import ModelTurn
 from skyrl_gym.answer_tasks import grade_reasoning_gym
 
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa

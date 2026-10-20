@@ -31,7 +31,8 @@ from skyrl_train.rollouts.genrm_grading import grade_genrm_rollouts
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, task_input
-from rolloutengine.contracts import ModelTurn, RolloutData, RolloutStep, Transition
+from rolloutengine.models import ModelTurn
+from skyrl_train.rollouts.training_record import TrainingRollout, TrainingStep, TrainingTransition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
@@ -169,7 +170,7 @@ def genrm_judge_server():
 @pytest.mark.parametrize("valid_peers", [0, 2])
 def test_genrm_ineligible_attempts_have_no_provisional_score(task_inputs, genrm_judge_server, valid_peers):
     _, request = task_inputs
-    task = request.rows[0].lowered.task
+    task = request.rows[0].spec.task
     specification = GroupGraderSpec(
         name="nemotron_genrm",
         parameters_json=GenRMGroupGraderParameters(
@@ -190,7 +191,7 @@ def test_genrm_ineligible_attempts_have_no_provisional_score(task_inputs, genrm_
         message = {"role": "assistant", "content": text}
         turn = ModelTurn(message, (1, 2), (3, 4), (-0.1, -0.2), "stop", text=text)
         records.append(
-            RolloutData(
+            TrainingRollout(
                 task_id=task.id,
                 messages=(message,),
                 prompt_token_ids=(1, 2),
@@ -199,7 +200,9 @@ def test_genrm_ineligible_attempts_have_no_provisional_score(task_inputs, genrm_
                 logprobs=(-0.1, -0.2),
                 grade=pending_grade,
                 stop_reason="stop",
-                steps=(RolloutStep(turn, Transition(done=True, reward=3.0, grade=pending_grade), 1, (message,)),),
+                steps=(
+                    TrainingStep(turn, TrainingTransition(done=True, reward=3.0, grade=pending_grade), 1, (message,)),
+                ),
             )
         )
     result = grade_genrm_rollouts(task, specification, records, [index < valid_peers for index in range(3)], "train")
@@ -238,7 +241,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
     config, request = task_inputs
     count = 3 if failed_peer else 2
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         extras={
             "extra_info": {
                 "nemotron_ultra": {
@@ -339,7 +342,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
 @pytest.mark.asyncio
 async def test_task_group_grader_preserves_separate_samples_and_private_inputs(task_inputs):
     config, request = task_inputs
-    task = request.rows[0].lowered.task
+    task = request.rows[0].spec.task
     task = task.model_copy(
         update={
             "grader": NoGrader(reason="Group grading supplies the final score"),

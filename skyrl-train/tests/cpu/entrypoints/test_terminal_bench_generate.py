@@ -99,5 +99,5 @@ def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
         f"task-{task}_{repetition_id}" for task in ("a", "b") for repetition_id in range(8)
     ]
     assert [row.metadata.metric_class for row in runner.request.rows] == ["taskcompendium"] * 16
-    assert [row.lowered.task.id for row in runner.request.rows] == (["task-a"] * 8 + ["task-b"] * 8)
+    assert [row.spec.task.id for row in runner.request.rows] == (["task-a"] * 8 + ["task-b"] * 8)
     assert runner.request.batch_metadata == BatchMetadata(global_step=0, training_phase="eval")

@@ -2,7 +2,8 @@
 
 import re
 
-from rolloutengine.contracts import ModelTurn, Transition
+from rolloutengine.models import ModelTurn
+from skyrl_gym.task_records import TaskTransition
 from taskcompendium.grading_result import GradeResult, Outcome
 
 from skyrl_gym.answer_tasks import ground_truth
@@ -33,7 +34,7 @@ Do not include any explanation after the final score.
 """
 
 
-def grade_judged_answer(turn: ModelTurn, config: dict, extras: dict) -> Transition:
+def grade_judged_answer(turn: ModelTurn, config: dict, extras: dict) -> TaskTransition:
     judge = OpenAIJudge(base_url=config["base_url"], model=config["model"], api_key_env="OPENAI_API_KEY")
     message = PROMPT + f"\n\nGOLD SOLUTION:\n{ground_truth(extras)}\n\nPREDICTED SOLUTION:\n{turn.text}\n\nAnswer:"
     reply = judge.generate([{"role": "user", "content": message}]).strip()
@@ -44,4 +45,4 @@ def grade_judged_answer(turn: ModelTurn, config: dict, extras: dict) -> Transiti
     else:
         reward = 0.0
         grade = GradeResult(Outcome.INFRA_ERROR, None, "The judge returned no score", diagnostics={"reply": reply})
-    return Transition(done=True, reward=reward, grade=grade)
+    return TaskTransition(done=True, reward=reward, grade=grade)

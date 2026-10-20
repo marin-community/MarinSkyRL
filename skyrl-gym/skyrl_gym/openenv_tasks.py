@@ -9,12 +9,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from rolloutengine.contracts import ModelTurn, SessionStart, Transition
+from rolloutengine.models import ModelTurn, Prompt
 from shellbox.machine import Command, ExitReason, Machine
+from skyrl_gym.task_records import TaskTransition, episode_prompt
 from skyrl_gym.source_task import session_parameters
 from taskcompendium.grading_result import GradeResult, Outcome
-from rolloutengine.spec import LoweredTaskSpec
-from rolloutengine.task_session import session_start
+from rolloutengine.models import TaskRolloutSpec
 
 from skyrl_gym.task_records import fold_grades
 
@@ -68,7 +68,7 @@ def serialize_observation(observation: dict, max_list_len: int = 20) -> str:
 class OpenEnvTaskSession:
     """Advance one OpenEnv server episode in the prepared task machine."""
 
-    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
+    def __init__(self, lowered: TaskRolloutSpec, machine: Machine | None):
         task = lowered.task
         assert machine is not None
         parameters = session_parameters(task)
@@ -79,7 +79,7 @@ class OpenEnvTaskSession:
         self.name = self.extras["env_name"]
         if self.name not in OPENENV_TASKS:
             raise ValueError(f"Unknown OpenEnv task: {self.name}")
-        self.max_turns = min(self.extras.get("max_turns", lowered.session.max_turns), lowered.session.max_turns)
+        self.max_turns = min(self.extras.get("max_turns", lowered.limits.max_turns), lowered.limits.max_turns)
         self.server_command = config["server_command"]
         self.port = config.get("server_port", OPENENV_PORT)
         self.timeout = config.get("timeout", REQUEST_TIMEOUT)
@@ -118,7 +118,7 @@ class OpenEnvTaskSession:
             raise RuntimeError("The OpenEnv server returned an invalid step result")
         return value
 
-    async def prepare(self) -> SessionStart:
+    async def prepare(self) -> Prompt:
         await self.machine.upload(HTTP_SERVICE_SCRIPT, self.script)
         result = await self.machine.run(
             Command(
@@ -131,12 +131,12 @@ class OpenEnvTaskSession:
             raise RuntimeError(f"OpenEnv startup failed: {result.stderr.decode(errors='replace')}")
         self.started = True
         initial = await self._request("reset", {})
-        start = session_start(self.task, shell_tool=None, provider_tools=())
-        return SessionStart(
+        start = episode_prompt(self.task)
+        return Prompt(
             (*start.messages, {"role": "user", "content": serialize_observation(initial["observation"])}), start.options
         )
 
-    async def advance(self, turn: ModelTurn) -> Transition:
+    async def advance(self, turn: ModelTurn) -> TaskTransition:
         try:
             action = action_payload(self.name, turn.text, self.extras)
         except (ValueError, SyntaxError, TypeError) as error:
@@ -153,7 +153,7 @@ class OpenEnvTaskSession:
         grade = GradeResult(Outcome.GRADED, reward)
         self.grades.append(grade)
         done = done or len(self.grades) >= self.max_turns
-        return Transition(
+        return TaskTransition(
             done=done,
             observations=() if done else ({"role": "user", "content": observation},),
             reward=reward,

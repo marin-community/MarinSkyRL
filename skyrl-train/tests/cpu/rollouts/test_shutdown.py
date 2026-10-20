@@ -35,7 +35,7 @@ from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_gym.source_task import source_task
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, task_input
-from rolloutengine.contracts import ModelTurn, Transition
+from rolloutengine.models import ModelTurn, Transition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
 from tests.cpu.rollouts.engine_fakes import InferenceClient, Tokenizer, Writer
 
@@ -94,7 +94,7 @@ async def test_owned_machine_preserves_fault_categories(tmp_path, operation, err
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_inputs, projection_type):
     config, original = task_inputs
-    task = original.rows[0].lowered.task
+    task = original.rows[0].spec.task
     task = task.model_copy(update={"environment_requirements": SHELL_ENVIRONMENT})
     request = replace(
         original,
@@ -184,7 +184,7 @@ class DeletionMachine:
 @pytest.mark.asyncio
 async def test_worker_shutdown_cancels_model_and_deletes_its_machine(task_inputs):
     config, request = task_inputs
-    lowered = request.rows[0].lowered
+    lowered = request.rows[0].spec
     task = lowered.task.model_copy(update={"environment_requirements": SHELL_ENVIRONMENT})
     request = replace(request, rows=(task_input(lowered_task(task, backend="fixture")),))
     started = asyncio.Event()
@@ -228,7 +228,7 @@ async def test_worker_shutdown_cancels_model_and_deletes_its_machine(task_inputs
 @pytest.mark.parametrize("complete_during_shutdown", [True, False])
 async def test_worker_shutdown_owns_late_creation_and_bounds_a_blocked_provider(task_inputs, complete_during_shutdown):
     config, request = task_inputs
-    lowered = request.rows[0].lowered
+    lowered = request.rows[0].spec
     task = lowered.task.model_copy(update={"environment_requirements": SHELL_ENVIRONMENT})
     request = replace(request, rows=(task_input(lowered_task(task, backend="fixture-provider")),))
     started = asyncio.Event()
@@ -502,7 +502,7 @@ async def test_blocking_grader_cannot_extend_attempt_or_cleanup_deadlines(task_i
         return Transition(done=True, reward=1.0, grade=GradeResult(Outcome.GRADED, 1.0))
 
     task = source_task(
-        conversation_messages(request.rows[0].lowered.task.context.events),
+        conversation_messages(request.rows[0].spec.task.context.events),
         {},
         {},
         Source(dataset="deadline", revision="1", row="0", importer_revision="1"),
@@ -525,7 +525,7 @@ async def test_blocking_grader_cannot_extend_attempt_or_cleanup_deadlines(task_i
         assert batch["exclude_from_baseline"] == [True]
         assert batch["verification_results"][0].score is None
         assert batch["verification_results"][0].diagnostics["cleanup_errors"] == [
-            {"operation": "session_close", "exception_type": "TimeoutError"}
+            {"operation": "episode_close", "exception_type": "TimeoutError"}
         ]
     finally:
         release.set()
@@ -594,7 +594,7 @@ async def test_worker_shutdown_cancels_the_whole_request_before_buffer_commit(ta
 @pytest.mark.parametrize("provider_error", [OSError, asyncio.CancelledError])
 async def test_worker_shutdown_reports_late_provider_close_failure_without_unhandled_task(task_inputs, provider_error):
     config, request = task_inputs
-    lowered = request.rows[0].lowered
+    lowered = request.rows[0].spec
     task = lowered.task.model_copy(update={"environment_requirements": SHELL_ENVIRONMENT})
     request = replace(request, rows=(task_input(lowered_task(task, backend="fixture-provider")),))
     started = asyncio.Event()

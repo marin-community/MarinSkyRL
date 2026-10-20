@@ -18,9 +18,8 @@ from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch
 from tests.gpu.utils import Timer, get_test_trajectory_request
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.utils.utils import initialize_ray
-from rolloutengine.contracts import Transition
+from skyrl_gym.task_records import TaskTransition, episode_prompt
 from taskcompendium.grading_result import GradeResult, Outcome
-from rolloutengine.task_session import session_start
 from loguru import logger
 from skyrl_train.config.utils import get_default_config
 
@@ -38,15 +37,15 @@ class ThreeTurnSession:
     def __init__(self, lowered, machine):
         self.task = lowered.task
         self.turns = 0
-        self.max_turns = lowered.session.max_turns
+        self.max_turns = lowered.limits.max_turns
 
     async def prepare(self):
-        return session_start(self.task, shell_tool=None, provider_tools=())
+        return episode_prompt(self.task)
 
     async def advance(self, turn):
         self.turns += 1
         done = self.turns >= self.max_turns
-        return Transition(
+        return TaskTransition(
             observations=({"role": "user", "content": f"{OBSERVATION_PROMPT} {self.turns}"},) if not done else (),
             reward=0.0,
             done=done,
