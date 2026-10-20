@@ -300,6 +300,43 @@ there is no GRPO optimizer update. The 8/8 step-1 task pass rate is also
 **not a learning-improvement result** without a matched step-0 evaluation at
 these new limits.
 
+### Matched teacher-trace checkpoint evaluation (2026-10-20)
+
+The step-0 Qwen3-0.6B policy and the teacher-trace SFT step-1 HF export were
+both evaluated through Pi, Daytona, the same verifier and the same
+8,192-token context / 2,048-token per-turn limit. All four jobs used SkyRL
+`4dc38620`, sampling temperature 1.0, seed 42, eight concurrent trials,
+and one physical trial per held-out task. Each had complete independent
+verifier coverage. These were evaluation-only jobs; no new optimizer step ran.
+
+| Held-out pack | Step 0 | Step 1 | Paired outcomes | Length stops (step 0 / step 1) |
+| --- | ---: | ---: | --- | ---: |
+| Eight write-a-line tasks (`heldout-eval-daytona-eight-v6`) | 7/8 | 7/8 | Six both pass, one each direction | 0 / 0 |
+| 32 tasks (`teacher-trace-heldout32-v1`) | 12/32 | 13/32 | Eight both pass, four step-0-only, five step-1-only, 15 both fail | 6 / 2 |
+
+The 32-task pack contains eight distinct instances each of writing a marker,
+summing five integers, filtering and sorting a list of words, and base64
+decoding. The pack was staged before either evaluation at
+`s3://marin-us-east-02a/MarinFold/pi-scenarios-shared-smoke-20261015/input/teacher-trace-heldout32-v1/tasks.parquet`
+(SHA-256 `e8eeec01ae7635ca5fec164fd51ef16d37b096c76be27fb38c4a29cb14ece586`).
+Neither pack includes the two teacher-trace training tasks. On the 32 tasks,
+step 0 passed `8/8` write, `4/8` sum, `0/8` filter and `0/8` decode;
+step 1 passed `4/8`, `8/8`, `0/8` and `1/8`, respectively. The changes
+include both regressions and gains. **A one-task net difference at one
+stochastic sample per policy does not establish learning improvement.** These
+synthetic terminal tasks also do not measure general software-engineering
+ability.
+
+The immutable attempts are `eval-attempt-37-step0-matched-eight`,
+`eval-attempt-38-step1-matched-eight`, `eval-attempt-39-step0-trace32`, and
+`eval-attempt-40-step1-trace32` under the regional
+`output/` prefix. Each retains only its numeric
+`exports/dumped_evals/eval_only/aggregated_results.jsonl` and a content-free
+`diagnostics/teacher-trace-eval-receipt.json` with task scores and model,
+source and task-pack identities. Raw and unchecked worker artifacts were
+removed. The earlier step-1-only 8/8 Daytona pass used a different code
+revision and cannot substitute for this matched comparison.
+
 ### Bounded-verbose verifier-GRPO retry (2026-10-20)
 
 The first fresh optimizer smoke (`grpo-attempt-29-verbose-four-groups`, Iris
@@ -432,10 +469,12 @@ numeric finding were retained from the failed four-turn attempt.
 
 Next smoke gates, in order:
 
-1. The saved step-1 student and step-0 baseline both scored 0/8 under the old
-   256-token cap. Step 1 now scored 8/8 on eight Daytona tasks at 8,192/2,048,
-   but step 0 has **not** been evaluated on that same pack/budget. Run that
-   matched baseline before drawing any learning conclusion.
+1. Matched 8,192/2,048 evaluations now cover both checkpoints on an eight-task
+   pack (7/8 each) and a more varied 32-task pack (12/32 step 0, 13/32 step 1).
+   This does **not** establish improvement after one teacher-trace update.
+   For a quality claim, expand training beyond the original two tasks and
+   predeclare repeated-seed, disjoint, diverse held-out evaluation with the
+   same source revision, budgets and independent grading for both policies.
 2. Diagnose the in-memory stdout transport and separate-verifier timeouts
    locally, then run a physical verifier-GRPO **baseline** group with
    two independently sampled Pi trials per prompt, exact per-turn sampled
