@@ -24,6 +24,7 @@ from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.model_clients import TRUNCATED_THINKING_KEY
+from skyrl_train.rollouts.guided_shell import HARNESS_METRIC_KEYS, harness_metrics
 from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
     get_batch_failure_metrics,
@@ -365,7 +366,7 @@ def _training_batch(
     metrics = None
     if env_metric_classes is not None:
         metrics = [
-            {} if environment == TASKCOMPENDIUM_ENVIRONMENT else dict(rollout.metrics)
+            final_harness_metrics(rollout) if environment == TASKCOMPENDIUM_ENVIRONMENT else dict(rollout.metrics)
             for rollout, environment in zip(rollouts, env_metric_classes, strict=True)
         ]
         if any(metrics):
@@ -506,6 +507,11 @@ def _task_error_policies(
     return [harbor if "harbor" in row.spec.task.tags else default for row in request.rows]
 
 
+def final_harness_metrics(rollout: TrainingRollout) -> dict[str, float]:
+    """The guided-shell metrics recorded on the rollout's final step."""
+    return harness_metrics(rollout.steps[-1].transition.metrics or {}) if rollout.steps else {}
+
+
 def truncated_thinking(rollout: TrainingRollout) -> bool:
     """Whether the rollout's final reply ended inside its reasoning block and so submitted no answer."""
     return bool(rollout.steps) and bool(rollout.steps[-1].turn.metadata.get(TRUNCATED_THINKING_KEY))
@@ -538,6 +544,12 @@ def _merge_task_metrics(batch: TrajectoryBatch, rollouts: Sequence[TrainingRollo
         "missing_logprob_tokens": sum(sum(rollout.loss_mask) for rollout in rollouts if rollout.logprobs is None),
         TRUNCATED_THINKING_KEY: sum(truncated_thinking(rollout) for rollout in rollouts),
     }
+    harness = [final_harness_metrics(rollout) for rollout in rollouts]
+    for key in HARNESS_METRIC_KEYS:
+        rows = [metrics[key] for metrics in harness if key in metrics]
+        if rows:
+            counters[key] = sum(rows)
+            counters[f"{key}_tasks"] = len(rows)
     metrics.update({f"{TASK_ROLLOUT_METRIC_PREFIX}{name}": float(value) for name, value in counters.items()})
     batch["rollout_metrics"] = metrics
     environments = [row.metadata.metric_class for row in request.rows]

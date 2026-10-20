@@ -125,9 +125,10 @@ def _read_pool(location: str) -> list[TaskRolloutSpec]:
         return [TaskRolloutSpec.model_validate_json(value) for value in pl.read_parquet(local)[TASK_ROLLOUT_COLUMN]]
 
 
-def _worker(concurrency: int, package_cache: str | None):
+def _worker(concurrency: int, package_cache: str | None, guided_shell: bool):
     config = get_default_config()
     config.environment.task_sessions.local = {} if package_cache is None else {"package_cache": package_cache}
+    config.environment.task_sessions.guided_shell = {} if guided_shell else None
     config.trajectory_runner.max_concurrent_tasks = concurrency
     config.generator.max_input_length = 1_000_000
     config.generator.sampling_params.max_generate_length = 32768
@@ -148,9 +149,13 @@ def refusals(worker, specs: Sequence[TaskRolloutSpec]) -> Counter[str]:
 
 
 async def replay(
-    specs: Sequence[TaskRolloutSpec], pool: Sequence[TaskRolloutSpec], concurrency: int, package_cache: str | None
+    specs: Sequence[TaskRolloutSpec],
+    pool: Sequence[TaskRolloutSpec],
+    concurrency: int,
+    package_cache: str | None,
+    guided_shell: bool,
 ) -> tuple[list[dict], dict]:
-    worker = _worker(concurrency, package_cache)
+    worker = _worker(concurrency, package_cache, guided_shell)
     summary = {"factories": sorted(worker.factories), "pool_check": dict(refusals(worker, pool))}
     print(summary, flush=True)
     scripts = {spec.task.id: script for spec in specs if (script := control_messages(spec)) is not None}
@@ -202,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--concurrency", type=int, default=64)
     parser.add_argument("--package-cache", help="Directory for the local backend's Python environments.")
     parser.add_argument("--backends", nargs="*", help="Replay only rows whose task machine uses these backends.")
+    parser.add_argument("--guided-shell", action="store_true", help="Run with environment.task_sessions.guided_shell.")
     parser.add_argument("--output", help="Where to write per-task replay records as JSON lines (local or s3://).")
     args = parser.parse_args(argv)
     specs = _read_pool(args.pool)
@@ -218,7 +224,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.sample == 0
         else random.Random(args.seed).sample(candidates, min(args.sample, len(candidates)))
     )
-    records, summary = asyncio.run(replay(chosen, specs, args.concurrency, args.package_cache))
+    records, summary = asyncio.run(replay(chosen, specs, args.concurrency, args.package_cache, args.guided_shell))
     full = [record["passed"] is True for record in records]
     summary.update(
         replayed=len(records),

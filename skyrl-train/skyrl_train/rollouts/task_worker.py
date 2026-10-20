@@ -58,6 +58,7 @@ from skyrl_train.rollouts.harbor_tasks import (
     shape_harbor_rollouts,
 )
 from skyrl_train.rollouts.harbor_settings import EnvironmentType
+from skyrl_train.rollouts.guided_shell import guided_shell_harness
 from skyrl_train.rollouts.local_machines import local_machine_factory
 from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
@@ -349,8 +350,10 @@ class TaskRolloutWorker:
         shutdown_timeout: float,
         installed_agents: InstalledAgentWorker | None = None,
         judge_connection: JudgeConnection | None = None,
+        guided_shell: Mapping[str, Any] | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
+        self.guided_shell = None if guided_shell is None else dict(guided_shell)
         self.model_client = model_client
         self.judge_connection = judge_connection
         self.factories = {name: OwnedMachineFactory(factory, name) for name, factory in factories.items()}
@@ -407,7 +410,10 @@ class TaskRolloutWorker:
     ) -> tuple[TaskRolloutSpec, Mapping[str, Harness]]:
         harnesses = episode_harnesses(lowered, self.sessions)
         if is_shell_harness(lowered.harness):
-            harnesses[lowered.harness] = shell_harness(lowered.harness)
+            harness = shell_harness(lowered.harness)
+            if self.guided_shell is not None:
+                harness = guided_shell_harness(harness, self.guided_shell)
+            harnesses[lowered.harness] = harness
         if lowered.harness == HARBOR_TRIAL_SESSION:
             if harbor is None or self.installed_agents is None:
                 raise ValueError("Full Harbor trials require Harbor and installed-agent settings")
@@ -683,4 +689,10 @@ class TaskRolloutWorkerSpec:
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
             installed_agents=installed_agents,
             judge_connection=judge,
+            guided_shell=_guided_shell_settings(self.config),
         )
+
+
+def _guided_shell_settings(config: DictConfig) -> dict[str, Any] | None:
+    settings = config.environment.task_sessions.get("guided_shell")
+    return None if settings is None else OmegaConf.to_container(settings, resolve=True)

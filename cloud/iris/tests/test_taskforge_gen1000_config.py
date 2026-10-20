@@ -32,6 +32,7 @@ def test_taskforge_recipe_enables_local_machines_and_the_2507_template(name, ent
 
     assert compiled.entrypoint == entrypoint
     assert dict(config.environment.task_sessions.local) == {}
+    assert dict(config.environment.task_sessions.guided_shell) == {}
     assert config.generator.chat_template.name_or_path == "chat_templates/qwen3_thinking_2507_acc.jinja2"
     assert config.generator.engine_init_kwargs.tool_call_parser == "hermes"
     assert config.generator.sampling_params.max_generate_length == 32768

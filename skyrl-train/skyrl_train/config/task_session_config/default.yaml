@@ -2,6 +2,7 @@
 max_verifier_workers: 32 # verifier threads in each rollout worker
 remote_judge: null # Set base_url and api_key_env to grade judge tasks on the rollout host.
 local: null # Set {} to enable Linux host tasks after the bubblewrap sandbox probe passes.
+guided_shell: null # Set {} to run shellbox tasks with skyrl_train.rollouts.guided_shell.GuidedShellHarness.
 daytona: null # Set api_key_env and ttl_minutes for tasks with the daytona backend.
 
 session:

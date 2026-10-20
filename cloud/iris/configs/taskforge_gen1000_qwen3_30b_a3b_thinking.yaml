@@ -84,6 +84,7 @@ generator:
 environment:
   task_sessions:
     local: {}
+    guided_shell: {}
     max_verifier_workers: 64
 
 trajectory_runner:
