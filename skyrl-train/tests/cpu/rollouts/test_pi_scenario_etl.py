@@ -18,6 +18,7 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import PiRolloutData, TaskRolloutWorker, _agent_session_factory
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.types import BatchMetadata, TaskRequestBatch, TrajectoryID
 from tests.cpu.rollouts.engine_fakes import InferenceClient
 from tests.cpu.task_specs import machine_runtime
@@ -387,22 +388,50 @@ def test_grpo_judge_reward_is_distinct_from_verifier_reward():
         )
 
 
-def test_multiturn_grpo_assembles_exact_prefix_and_masks_tool_observations():
+@pytest.mark.parametrize("second_prompt", [[20, 21, 777, 301, 302], [501, 502, 503]])
+def test_multiturn_grpo_keeps_exact_sampled_turns_without_fabricating_prefix(second_prompt):
     raw = trial()
-    raw["turns"][1]["executed"]["prompt_token_ids"] = [20, 21, 777, 301, 302]
+    raw["turns"][1]["executed"]["prompt_token_ids"] = second_prompt
     evidence = HydratedPiTrial.model_validate(raw)
     result = scenario_training_rows(
         PiScenario.VERIFIER_GRPO, evidence, StudentTokenizer(), expected_trial_id="trial-1", expected_policy_step=3
     )
-    [row] = result.rows
-    assert row.prompt_token_ids == (20, 21)
-    assert row.response_ids == (777, 301, 302, 999)
-    assert row.loss_mask == (1, 0, 0, 1)
-    assert row.token_sources == (TokenSource.STUDENT, TokenSource.CONTEXT, TokenSource.CONTEXT, TokenSource.STUDENT)
-    assert row.behavior_logprobs == (-0.25, 0.0, 0.0, -0.25)
+    assert [row.prompt_token_ids for row in result.rows] == [(20, 21), tuple(second_prompt)]
+    assert [row.response_ids for row in result.rows] == [(777,), (999,)]
+    assert all(row.loss_mask == (1,) and row.token_sources == (TokenSource.STUDENT,) for row in result.rows)
+    assert all(row.behavior_logprobs == (-0.25,) for row in result.rows)
+    assert result.evidence_messages[-1] == {"role": "assistant", "content": "Done"}
+    assert result.evidence_messages[-2] == {"role": "tool", "tool_call_id": "call-1", "content": "one"}
     batch = training_rows_to_batch(result)
-    assert batch["rollout_logprobs"][0].tolist() == [-0.25, 0.0, 0.0, -0.25]
-    assert batch["loss_masks"] == [[1, 0, 0, 1]]
+    assert batch["is_last_step"] == [False, True]
+    assert batch["rollout_logprobs"][0].tolist() == [-0.25]
+    assert batch["loss_masks"] == [[1], [1]]
+
+
+def test_multiturn_grpo_group_counts_physical_trials_not_turn_rows():
+    batches = []
+    for index, reward in enumerate((1.0, 0.0)):
+        raw = trial()
+        raw["trial_id"] = f"trial-{index}"
+        raw["verifier_reward"] = reward
+        raw["verifier_passed"] = bool(reward)
+        raw["turns"][1]["executed"]["prompt_token_ids"] = [501 + index, 502, 503]
+        rows = scenario_training_rows(
+            PiScenario.VERIFIER_GRPO,
+            HydratedPiTrial.model_validate(raw),
+            StudentTokenizer(),
+            expected_trial_id=f"trial-{index}",
+            expected_policy_step=3,
+        )
+        batches.append(training_rows_to_batch(rows))
+    group = concatenate_trajectory_batches(batches, tis_lcs_alert_threshold=0.005)
+    assert group["is_last_step"] == [False, True, False, True]
+    admission = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2), rollout_logprobs_required=True
+    ).evaluate(SimpleNamespace(trajectory_batch=group))
+    assert admission.accepted
+    assert group["rewards"][1][-1] == 1.0
+    assert group["rewards"][3][-1] == 0.0
 
 
 def test_sampled_tool_json_and_executed_pi_replay_stay_distinct():
@@ -417,7 +446,8 @@ def test_sampled_tool_json_and_executed_pi_replay_stay_distinct():
     rows = scenario_training_rows(
         PiScenario.VERIFIER_GRPO, evidence, StudentTokenizer(), expected_trial_id="trial-1", expected_policy_step=3
     )
-    assert rows.rows[0].loss_mask == (1, 0, 1)
+    assert [row.loss_mask for row in rows.rows] == [(1,), (1,)]
+    assert rows.rows[1].prompt_token_ids == (20, 21, 777, 301)
     raw["turns"][0]["executed_assistant"]["tool_calls"][0]["function"]["arguments"] = '{"command":"rm -rf /"}'
     with pytest.raises(ValidationError, match="differs from the sampled model action"):
         HydratedPiTrial.model_validate(raw)
@@ -704,6 +734,40 @@ async def test_worker_training_batch_transforms_graded_pi_payload_without_logs(t
         await worker.training_batch(request, [replace(graded, pi_trajectory={**trajectory, "trial_id": "forged"})])
     with pytest.raises(ValueError, match="leased identity"):
         await worker.training_batch(request, [replace(graded, pi_trajectory={**trajectory, "policy_step": 99})])
+
+
+@pytest.mark.asyncio
+async def test_verifier_grpo_rejects_unleased_per_turn_rows(task_inputs):
+    cfg = get_default_config().generator
+    worker = TaskRolloutWorker(
+        cfg,
+        WholeTaskProjection(cfg, StudentTokenizer()),
+        InferenceClient(),
+        {},
+        pi_scenario={"preset": "verifier_grpo_base"},
+        shutdown_timeout=1,
+    )
+    raw = trial()
+    trajectory = {key: raw[key] for key in ("schema_version", "trial_id", "policy_step", "turns", "planned_executors")}
+    trajectory.update(critique_feedback=None, critique=None)
+    graded = PiRolloutData(
+        task_id="task-1",
+        messages=(),
+        prompt_token_ids=(1,),
+        response_token_ids=(999,),
+        loss_mask=(1,),
+        logprobs=(-0.25,),
+        grade=GradeResult(Outcome.GRADED, 0.0, passed=False),
+        stop_reason="stop",
+        pi_trajectory=PiCollatedTrajectory.model_validate(trajectory).model_dump(mode="json"),
+        session_id="trial-1",
+    )
+    request = TaskRequestBatch(
+        rows=task_inputs[1].rows,
+        batch_metadata=BatchMetadata(global_step=3, training_phase="train"),
+    )
+    with pytest.raises(ValueError, match="physical trial IDs"):
+        await worker.training_batch(request, [graded])
 
 
 @pytest.mark.asyncio

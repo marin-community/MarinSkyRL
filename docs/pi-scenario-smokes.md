@@ -402,7 +402,16 @@ The job failed without a complete physical batch or optimizer checkpoint.
 The upload cancellation may be collateral to this batch failure; the logs do
 not prove who initiated that individual cancellation. There is no preemption
 signal. The tokenizer/context-rendering cause of the token-prefix mismatch
-remains to be isolated on this same path. Harbor
+remains to be isolated on this same path. SkyRL now represents **verifier-GRPO**
+with one exact served prompt, sampled response and aligned logprobs **per
+turn**, rather than stitching incompatible rendered contexts into a fabricated
+single token sequence. Only the final turn counts as the physical trial for
+group admission; step-wise GRPO propagates its independently graded trial
+reward/advantage to its preceding sampled turns. This is a distinct ETL
+repair from the Harbor FD 3 fix: a CPU regression covers a re-rendered
+multi-turn tool context, two physical trials (four optimizer rows), group
+admission and an optimizer update. **No new GPU replay has established a
+complete graded group or checkpoint with this repair yet.** Harbor
 `d26852ea` additionally rejects **any** non-frame stdout in capture mode
 without logging its contents; Pi JSON/diagnostic events cannot be silently
 ignored or treated as training evidence. Normal jobs must leave the

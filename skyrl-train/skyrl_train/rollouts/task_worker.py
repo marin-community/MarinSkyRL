@@ -642,6 +642,8 @@ class TaskRolloutWorker:
                 batches = []
                 rejected_teacher_trials = 0
                 identities = request.trajectory_ids
+                if self.pi_scenario is PiScenario.VERIFIER_GRPO and identities is None:
+                    raise ValueError("Pi verifier GRPO requires physical trial IDs for its per-turn rows")
                 expanded_ids = []
                 for index, rollout in enumerate(outputs):
                     if not isinstance(rollout, PiRolloutData) or rollout.failure is not None:

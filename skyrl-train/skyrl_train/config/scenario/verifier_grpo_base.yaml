@@ -2,6 +2,7 @@
 scenario:
   preset: verifier_grpo_base
 trainer:
+  step_wise_training: true
   algorithm:
     policy_loss_type: regular
     advantage_estimator: grpo

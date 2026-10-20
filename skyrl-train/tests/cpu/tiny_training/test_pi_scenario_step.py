@@ -17,6 +17,7 @@ from skyrl_train.objective.reduction import step_counts
 from skyrl_train.rollouts.pi_scenario_etl import scenario_rows_from_config, training_rows_to_batch
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.tiny_training.cpu_backend import CausalLMPolicy
@@ -47,6 +48,7 @@ def _config(preset: str):
     cfg.generator.n_samples_per_prompt = 1 if teacher else 2
     if not teacher:
         cfg.generator.sampling_params.logprobs = 0
+        cfg.generator.eval_sampling_params.logprobs = 0
     cfg.generator.max_turns = 2 if teacher else 1
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine_tensor_parallel_size = 1
@@ -56,6 +58,7 @@ def _config(preset: str):
     cfg.trainer.micro_forward_batch_size_per_gpu = 1
     cfg.trainer.algorithm.advantage_estimator = "uniform" if teacher else "grpo"
     cfg.trainer.algorithm.policy_loss_type = "sft" if teacher else "regular"
+    cfg.trainer.step_wise_training = not teacher
     cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.algorithm.use_entropy_loss = False
     if teacher:
@@ -108,8 +111,44 @@ def _trial(tokenizer, *, trial_id: str, answer: str, reward: float, teacher: boo
     }
 
 
-@pytest.mark.parametrize("preset", ["verifier_grpo_base", "teacher_demo_pi_base", "teacher_demo_pi_verified_base"])
-def test_pi_scenario_training_objective_steps_on_cpu(tiny_policy: Path, preset: str):
+def _append_discontinuous_student_turn(payload: dict, tokenizer) -> None:
+    """Exercise a real tool-rendered prompt that is not the sampled token prefix."""
+    first = payload["turns"][0]
+    action = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "call-1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"echo ok"}'}}
+        ],
+    }
+    observation = {"role": "tool", "tool_call_id": "call-1", "content": "ok"}
+    second = deepcopy(first)
+    second["index"] = 1
+    second["executed"]["request_id"] += "-followup"
+    second["executed"]["messages"] = [*first["executed"]["messages"], action, observation]
+    second["executed"]["prompt_token_ids"] = tokenizer.apply_chat_template(
+        second["executed"]["messages"], tokenize=True, add_generation_prompt=True
+    )["input_ids"]
+    first["executed"]["assistant"] = action
+    first["executed"]["response_token_ids"] = tokenizer.encode("echo ok", add_special_tokens=False)
+    first["executed"]["logprobs"] = [-0.25] * len(first["executed"]["response_token_ids"])
+    first["executed_assistant"] = action
+    first["observations"] = [{"tool_call_id": "call-1", "content": "ok", "authored_by": "student"}]
+    sampled_prefix = [*first["executed"]["prompt_token_ids"], *first["executed"]["response_token_ids"]]
+    assert second["executed"]["prompt_token_ids"][: len(sampled_prefix)] != sampled_prefix
+    payload["turns"].append(second)
+
+
+@pytest.mark.parametrize(
+    ("preset", "tool_followup"),
+    [
+        ("verifier_grpo_base", False),
+        ("verifier_grpo_base", True),
+        ("teacher_demo_pi_base", False),
+        ("teacher_demo_pi_verified_base", False),
+    ],
+)
+def test_pi_scenario_training_objective_steps_on_cpu(tiny_policy: Path, preset: str, tool_followup: bool):
     cfg = _config(preset)
     if preset in ("teacher_demo_pi_base", "teacher_demo_pi_verified_base"):
         validate_pi_objective_config(cfg)
@@ -122,6 +161,8 @@ def test_pi_scenario_training_objective_steps_on_cpu(tiny_policy: Path, preset: 
     for index, answer in enumerate(answers):
         trial_id = f"pi-{index}"
         payload = _trial(tokenizer, trial_id=trial_id, answer=answer, reward=float(index == 0), teacher=teacher)
+        if tool_followup:
+            _append_discontinuous_student_turn(payload, tokenizer)
         if teacher:
             _append_teacher_turn(payload)
             if preset == "teacher_demo_pi_base":
@@ -135,6 +176,13 @@ def test_pi_scenario_training_objective_steps_on_cpu(tiny_policy: Path, preset: 
         )
         batches.append(training_rows_to_batch(rows))
     batch = batches[0] if teacher else concatenate_trajectory_batches(batches, tis_lcs_alert_threshold=0.005)
+    if not teacher:
+        batch["trajectory_ids"] = [
+            TrajectoryID("same-task", index) for index in range(len(answers)) for _ in range(2 if tool_followup else 1)
+        ]
+        if tool_followup:
+            assert batch["is_last_step"] == [False, True, False, True]
+            assert len(batch["response_ids"]) == 4
     assert (batch["rollout_logprobs"] is None) == teacher
     if preset == "teacher_demo_pi_base":
         assert batch["unshaped_reward_available"] == [False]
@@ -150,7 +198,7 @@ def test_pi_scenario_training_objective_steps_on_cpu(tiny_policy: Path, preset: 
         if teacher
         else GroupAdvantageInvariant.exact_physical(physical_group_size=2)
     )
-    input_batch = trainer.convert_to_training_input(batch, ["same-task"] * len(answers))
+    input_batch = trainer.convert_to_training_input(batch, ["same-task"] * len(batch["response_ids"]))
     input_batch["values"] = None
     trainer.compute_advantages_and_returns(input_batch)
     mask = input_batch["loss_mask"]
@@ -160,7 +208,7 @@ def test_pi_scenario_training_objective_steps_on_cpu(tiny_policy: Path, preset: 
         assert not mask[0].bool().all()  # Intervening context must not receive SFT loss.
     else:
         assert input_batch["advantages"][0][mask[0].bool()].mean() > 0
-        assert input_batch["advantages"][1][mask[1].bool()].mean() < 0
+        assert input_batch["advantages"][2 if tool_followup else 1][mask[2 if tool_followup else 1].bool()].mean() < 0
 
     model = CausalLMPolicy(AutoModelForCausalLM.from_pretrained(tiny_policy, dtype=torch.float32))
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)

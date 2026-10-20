@@ -367,7 +367,7 @@ def _student_row(turn: PiTurn, reward: float, verifier_reward: float, source: To
 
 
 def _student_trajectory_row(turns: tuple[PiTurn, ...], reward: float, verifier_reward: float) -> TrainingRow:
-    """Assemble exact served prefixes; mask all intervening tool/context tokens."""
+    """Assemble exact served prefixes for objectives requiring one row per trial."""
     prompt = turns[0].executed.prompt_token_ids
     tokens = prompt
     response: list[int] = []
@@ -479,7 +479,14 @@ def scenario_training_rows(
                     raise ValueError("Pi distribution must not contain a judge result")
                 raise ValueError("Verifier GRPO must not substitute a teacher judgment")
             reward = trial.verifier_reward
-        rows = [_student_trajectory_row(turns, reward, trial.verifier_reward)]
+        # Tool calls and observations may re-render or truncate the next
+        # served prompt. GRPO trains on each exact sampled turn instead of
+        # inventing a single continuous token stream across those boundaries.
+        rows = (
+            [_student_row(turn, reward, trial.verifier_reward, TokenSource.STUDENT) for turn in turns]
+            if scenario is PiScenario.VERIFIER_GRPO
+            else [_student_trajectory_row(turns, reward, trial.verifier_reward)]
+        )
     if not rows:
         raise ValueError("Pi trial has no eligible training rows")
     last = trial.turns[-1]
@@ -548,7 +555,7 @@ def training_rows_to_batch(result: TrainingRows) -> TrajectoryBatch:
         response_span_tags=None,
         trajectory_ids=None,
         teacher_route_keys=None,
-        is_last_step=[True] * len(rows),
+        is_last_step=[index == len(rows) - 1 for index in range(len(rows))],
         exclude_from_baseline=[False] * len(rows),
     )
 
