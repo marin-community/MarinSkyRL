@@ -2051,7 +2051,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.8.1"
-source = { git = "https://github.com/znichols/harbor.git?rev=d26852eac307dd6f80856596005b850dc979e4ed#d26852eac307dd6f80856596005b850dc979e4ed" }
+source = { git = "https://github.com/znichols/harbor.git?rev=8f8f497ac510041acbfca7f63af0b918c484569a#8f8f497ac510041acbfca7f63af0b918c484569a" }
 dependencies = [
     { name = "dirhash" },
     { name = "fastapi" },
@@ -3157,7 +3157,7 @@ requires-dist = [
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = ">=2024.0.0" },
     { name = "func-timeout" },
-    { name = "harbor", marker = "sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/znichols/harbor.git?rev=d26852eac307dd6f80856596005b850dc979e4ed" },
+    { name = "harbor", marker = "sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/znichols/harbor.git?rev=8f8f497ac510041acbfca7f63af0b918c484569a" },
     { name = "hf-transfer" },
     { name = "hs-connectors", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?subdirectory=hs_connectors&rev=6496b4db007de00dd4741349643d23b23e29dce8" },
     { name = "huggingface-hub", specifier = ">=0.34.0" },
@@ -3273,7 +3273,7 @@ docs = [
     { name = "sphinx-copybutton", specifier = ">=0.5.0" },
     { name = "sphinx-rtd-theme", specifier = ">=2.0.0" },
 ]
-harbor-test = [{ name = "harbor", git = "https://github.com/znichols/harbor.git?rev=d26852eac307dd6f80856596005b850dc979e4ed" }]
+harbor-test = [{ name = "harbor", git = "https://github.com/znichols/harbor.git?rev=8f8f497ac510041acbfca7f63af0b918c484569a" }]
 
 [[package]]
 name = "markdown"
