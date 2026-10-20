@@ -23,6 +23,7 @@ from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
+from skyrl_train.trajectory_runners.model_clients import TRUNCATED_THINKING_KEY
 from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
     get_batch_failure_metrics,
@@ -505,6 +506,11 @@ def _task_error_policies(
     return [harbor if "harbor" in row.spec.task.tags else default for row in request.rows]
 
 
+def truncated_thinking(rollout: TrainingRollout) -> bool:
+    """Whether the rollout's final reply ended inside its reasoning block and so submitted no answer."""
+    return bool(rollout.steps) and bool(rollout.steps[-1].turn.metadata.get(TRUNCATED_THINKING_KEY))
+
+
 def _merge_task_metrics(batch: TrajectoryBatch, rollouts: Sequence[TrainingRollout], request: TaskRequestBatch) -> None:
     """Count task evidence and preserve environment-specific metrics."""
     metrics = batch.get("rollout_metrics") or {}
@@ -530,6 +536,7 @@ def _merge_task_metrics(batch: TrajectoryBatch, rollouts: Sequence[TrainingRollo
         "tool_tasks": sum(any(step.turn.message.get("tool_calls") for step in rollout.steps) for rollout in rollouts),
         "generated_tokens": sum(sum(rollout.loss_mask) for rollout in rollouts),
         "missing_logprob_tokens": sum(sum(rollout.loss_mask) for rollout in rollouts if rollout.logprobs is None),
+        TRUNCATED_THINKING_KEY: sum(truncated_thinking(rollout) for rollout in rollouts),
     }
     metrics.update({f"{TASK_ROLLOUT_METRIC_PREFIX}{name}": float(value) for name, value in counters.items()})
     batch["rollout_metrics"] = metrics

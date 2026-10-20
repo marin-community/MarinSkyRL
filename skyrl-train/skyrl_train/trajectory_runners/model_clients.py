@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text, unclosed_reasoning
 
 from skyrl_train.inference_engines.base import (
     CHOICE_POLICY_STEPS_KEY,
@@ -39,6 +39,9 @@ from skyrl_train.rollout_observability import rollout_phase
 # requests carry it only as `max_completion_tokens`, which vLLM prefers over `max_tokens`.
 _OUTPUT_LIMIT_KEYS = ("max_generate_length", "max_tokens")
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({*_OUTPUT_LIMIT_KEYS, "logprobs", "stop"})
+TRUNCATED_THINKING_KEY = "truncated_thinking"
+GENERATION_PROMPT_TOKENS = 8
+"""How many trailing prompt tokens hold the generation prompt, where a thinking template opens ``<think>``."""
 
 
 class ModelClientOutput(InferenceEngineOutput):
@@ -89,6 +92,7 @@ class _ChatResult:
     generation_token_budget: int | None
     routed_experts: np.ndarray | None = None
     policy_steps: list[int] | None = None
+    truncated_thinking: bool = False
 
 
 def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
@@ -119,6 +123,7 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
+    output[TRUNCATED_THINKING_KEY] = [result.truncated_thinking for result in results]
     if all(result.policy_steps is not None for result in results):
         output["response_policy_steps"] = [result.policy_steps for result in results]
     return output
@@ -300,6 +305,13 @@ class DirectModelClient:
                 text = final_answer_text(decoded)
                 if not message.get("tool_calls"):
                     message = {**message, "content": text}
+            # A final reply that never closed its reasoning block (opened by the response, or by a thinking
+            # template's generation prompt) has no answer. Its reasoning must not be graded as one.
+            generation_prompt = tokenizer.decode(prompt_ids[-GENERATION_PROMPT_TOKENS:], skip_special_tokens=False)
+            truncated_thinking = not message.get("tool_calls") and unclosed_reasoning(generation_prompt + decoded)
+            if truncated_thinking:
+                text = ""
+                message = {**message, "content": ""}
             logprob_items = (choice.get("logprobs") or {}).get("content")
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
@@ -334,6 +346,7 @@ class DirectModelClient:
                 token_budget,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
                 choice.get(CHOICE_POLICY_STEPS_KEY),
+                truncated_thinking,
             )
 
         results = await asyncio.gather(

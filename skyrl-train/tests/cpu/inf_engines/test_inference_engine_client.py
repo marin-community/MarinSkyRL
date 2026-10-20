@@ -503,7 +503,7 @@ async def test_chat_transports_preserve_route_tokens(transport, interrupted):
         eos_token_id = 99
 
         def decode(self, ids, **kwargs):
-            return "".join({11: "A", 12: "B"}[token] for token in ids)
+            return "".join({11: "A", 12: "B"}.get(token, "") for token in ids)
 
     class Engine:
         def __init__(self):

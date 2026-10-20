@@ -8,6 +8,8 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 
 from skyrl_train.utils import Timer
+from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
+from skyrl_train.trajectory_runners.model_clients import TRUNCATED_THINKING_KEY
 from skyrl_train.evaluation_pool import EvaluationPool
 from skyrl_train.io import io
 from marinskyrl.resource_locator import join_resource_path
@@ -216,6 +218,9 @@ def _calculate_eval_metrics(
         if average is not None:
             metrics["eval/all/avg_verifier_score"] = average
     metrics.update({f"eval/all/{key}": value for key, value in evaluation_response_metrics(batch).items()})
+    truncated = (batch.get("rollout_metrics") or {}).get(f"{TASK_ROLLOUT_METRIC_PREFIX}{TRUNCATED_THINKING_KEY}")
+    if truncated is not None:
+        metrics[f"eval/all/{TRUNCATED_THINKING_KEY}"] = truncated
     return metrics
 
 

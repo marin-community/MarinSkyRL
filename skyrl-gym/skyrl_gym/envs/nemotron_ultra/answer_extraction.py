@@ -11,6 +11,15 @@ REASONING_DELIMITERS = (
 )
 
 
+def unclosed_reasoning(text: str) -> bool:
+    """Whether ``text`` ends inside a reasoning block: its last opening marker has no closing marker after it."""
+    for opening, closing in REASONING_DELIMITERS:
+        start = text.rfind(opening)
+        if start != -1 and closing not in text[start:]:
+            return True
+    return False
+
+
 def final_answer_text(text: str) -> str:
     """Strip explicit reasoning blocks, preserving unmarked text.
 

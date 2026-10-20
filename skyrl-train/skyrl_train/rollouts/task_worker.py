@@ -66,6 +66,7 @@ from skyrl_train.rollout_observability import rollout_phase, rollout_wait
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.model_clients import (
     DirectModelClient,
+    TRUNCATED_THINKING_KEY,
     GenerationBudgetExceededError,
     ModelClient,
     ModelServerError,
@@ -209,6 +210,7 @@ async def _model_turn(
                 if output.get(name) is not None
             },
             "generation_token_budget": (output.get("generation_token_budgets") or [None])[0],
+            TRUNCATED_THINKING_KEY: bool((output.get(TRUNCATED_THINKING_KEY) or [False])[0]),
         },
     )
 
