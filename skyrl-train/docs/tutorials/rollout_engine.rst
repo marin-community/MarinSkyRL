@@ -159,3 +159,16 @@ Source-row conversion uses the standard entrypoint. Harbor task directories use 
 ``terminal_bench`` entrypoint. All use the same worker, with retries and group
 grading before projection. Multi-stage tasks and task-specific image builds are
 not supported. See :doc:`task_rollouts` for session and backend selection.
+
+Local task machines
+-------------------
+
+Set ``environment.task_sessions.local: {}`` to enable tasks whose machine
+backend is ``local``. The worker constructs the Shellbox local factory before
+serving rollouts, which probes whether bubblewrap can create its sandbox.
+Unsupported platforms and insufficient sandbox privileges fail worker startup.
+The backend never falls back to running commands without a sandbox.
+
+Local machines require ``memory_mb: null`` because the backend does not enforce
+memory limits. Their Python lock and read-only runtime mounts remain part of the
+TaskRolloutSpec; enabling the factory does not expose extra host directories.

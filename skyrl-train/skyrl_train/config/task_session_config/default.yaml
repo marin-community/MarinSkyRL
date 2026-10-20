@@ -1,6 +1,7 @@
 # @package environment.task_sessions
 max_verifier_workers: 32 # verifier threads in each rollout worker
 remote_judge: null # Set base_url and api_key_env to grade judge tasks on the rollout host.
+local: null # Set {} to enable Linux host tasks after the bubblewrap sandbox probe passes.
 daytona: null # Set api_key_env and ttl_minutes for tasks with the daytona backend.
 token_prefix: null # Set tokenizer_model and immutable tokenizer_revision to match the staged policy tokenizer.
 
