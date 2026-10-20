@@ -40,6 +40,7 @@ def run_clipping_rank(rank, world_size, rendezvous):
             head_dim=32,
             max_position_embeddings=32,
             sliding_window=16,
+            qk_mult=1.5703274004183786,
             architectures=["GrugMoeForCausalLM"],
         )
         for max_grad_norm in (1.0, 0.0):
