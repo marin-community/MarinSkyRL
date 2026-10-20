@@ -222,7 +222,8 @@ def test_local_teacher_runtime_accepts_multiple_routes_to_one_pinned_teacher(mon
 
 
 @pytest.mark.asyncio
-async def test_local_teacher_runtime_scores_admitted_groups_and_owns_engine(monkeypatch):
+@pytest.mark.parametrize("load_format", ["dummy", "safetensors"])
+async def test_local_teacher_runtime_scores_admitted_groups_and_owns_engine(monkeypatch, load_format):
     engine = _Engine()
     engine_kwargs = {}
     tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
@@ -234,6 +235,7 @@ async def test_local_teacher_runtime_scores_admitted_groups_and_owns_engine(monk
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
     cfg = _config()
+    cfg.generator.engine_init_kwargs.load_format = load_format
     cfg.teachers.primary.resources.max_num_batched_tokens = 64
     cfg.teachers.primary.resources.gpu_memory_utilization = 0.6
     prepared = prepare_distillation_runtime(cfg, tokenizer)
@@ -258,6 +260,10 @@ async def test_local_teacher_runtime_scores_admitted_groups_and_owns_engine(monk
     torch.testing.assert_close(training_input["distillation_loss_weights"], torch.tensor([[0.5, 0.5]]))
     assert engine_kwargs["max_num_batched_tokens"] == 64
     assert engine_kwargs["gpu_memory_utilization"] == 0.6
+    if load_format == "dummy":
+        assert "load_format" not in engine_kwargs["engine_init_kwargs"]
+    else:
+        assert engine_kwargs["engine_init_kwargs"]["load_format"] == "safetensors"
     assert engine.teardown_count == 1
 
 
