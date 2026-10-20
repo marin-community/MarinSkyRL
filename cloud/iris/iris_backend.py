@@ -28,7 +28,7 @@ from urllib.parse import unquote, urlparse
 
 import yaml
 from iris.client.client import IrisClient, Job
-from iris.cluster.constraints import CLUSTER_CONSTRAINT_KEY, Constraint, ConstraintOp, infer_preemptible_constraint
+from iris.cluster.constraints import CLUSTER_CONSTRAINT_KEY, Constraint, ConstraintOp, preemptible_constraint
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
 from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
 from iris.resources.state import JobState
@@ -245,9 +245,8 @@ def _gpu_constraints(
     constraints = []
     if target_cluster:
         constraints.append(Constraint.create(key=CLUSTER_CONSTRAINT_KEY, op=ConstraintOp.EQ, value=target_cluster))
-    inferred = infer_preemptible_constraint(resources, replicas, constraints)
-    if inferred is not None:
-        constraints.append(inferred)
+    # Task 246: the MOPD LR test runs its GPU gangs non-preemptible (cw-rno2a preempts interactive gangs).
+    constraints.append(preemptible_constraint(False))
     return constraints
 
 
