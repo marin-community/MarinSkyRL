@@ -21,6 +21,13 @@ def test_local_machines_refuse_hosts_without_linux_sandboxes(monkeypatch):
         local_machines.local_machine_factory({})
 
 
+def test_local_machines_refuse_hosts_without_uv(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(local_machines.shutil, "which", lambda _name: None)
+    with pytest.raises(ValueError, match="uv on the rollout worker's PATH"):
+        local_machines.local_machine_factory({})
+
+
 def test_local_machines_refuse_unknown_settings():
     with pytest.raises(ValueError, match="Unknown environment.task_sessions.local settings"):
         local_machines.local_machine_factory({"memory_mb": 1024})

@@ -7,6 +7,7 @@ cannot build a sandbox (on CoreWeave this needs the Iris ``container_profile_pri
 The worker never falls back to running commands without a sandbox.
 """
 
+import shutil
 import sys
 import threading
 import time
@@ -65,6 +66,9 @@ def local_machine_factory(settings: Mapping[str, Any]) -> MachineFactory:
         raise ValueError(f"Unknown environment.task_sessions.local settings: {sorted(unknown)}")
     if sys.platform != "linux":
         raise ValueError("Local task execution requires a Linux host with working bubblewrap sandboxes")
+    if shutil.which("uv") is None:
+        # The local factory builds each PackageSpec machine's CPython with uv on the worker's PATH.
+        raise ValueError("Local task execution requires uv on the rollout worker's PATH")
     # The local backend's bubblewrap package installs only on Linux.
     from shellbox.backends.local.machine import LocalMachineFactory  # noqa: PLC0415
 
