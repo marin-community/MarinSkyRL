@@ -389,6 +389,18 @@ replace the missing physical eighth trial with log evidence. As with the
 previous retries, unchecked S3 artifacts were deleted; only content-free
 journals, validated bounded diagnostics, and a numeric finding remain.
 
+A four-turn replay (`grpo-attempt-35-four-turn-four-groups`, Iris
+`/zack/pi-beta-verifier-grpo-gb200-20261020-r7`) again showed **zero
+oversized-frame warnings**. Seven agents completed; the eighth was cancelled
+before its first model request. The job failed without a complete physical
+batch or optimizer checkpoint. This is not evidence of a successful GRPO
+update, nor does it establish why that trial was cancelled. Harbor
+`d26852ea` additionally rejects **any** non-frame stdout in capture mode
+without logging its contents; Pi JSON/diagnostic events cannot be silently
+ignored or treated as training evidence. Normal jobs must leave the
+raw-frame diagnostic disabled. Only validated bounded diagnostics and a
+numeric finding were retained from the failed four-turn attempt.
+
 Next smoke gates, in order:
 
 1. The saved step-1 student and step-0 baseline both scored 0/8 under the old
