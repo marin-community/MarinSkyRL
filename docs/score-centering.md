@@ -163,10 +163,51 @@ Numeric transport source `87f13fcd82b4677545816e0789c685d10cf051a0`, executed th
 `92d057c561b0893a3d922e42f221eb8d5b1e68fb`, passed 126 CPU adapter checks and a complete 35-update native
 Qwen qualification. All four old/new chat comparisons matched exactly at temperatures 1.0 and 0.7 through
 4096 tokens; actual causal head references had maximum error below 2e-6. The
-[integration record](https://github.com/yonromai/marin/tree/e4d85ef4fa57cfdbbd1f652780d3cdf72bb1f161/experiments/post_training/score_centering_integration)
-retains source pins, formatter edge cases, complete reports, controls and allocation accounting. Matched
-Snowball serialized costs and real asynchronous throughput remain pending batch capacity. Qwen and CPU
-representation timings do not establish those costs.
+[integration record](https://github.com/yonromai/marin/tree/ee2abae52a384675aae56a88d9c916a6286146f0/experiments/post_training/score_centering_integration)
+retains source pins, formatter edge cases, complete reports and allocation accounting.
+
+Complete matched Snowball controls used four eight-H100 learner nodes and one eight-H100 inference node on
+RNO, with the same checkpoint, tokenizer, tasks, sampling and 174080-response-token batch in both arms. Each
+mode had one profiled warmup and two measured rotating cycles, applying 18 updates per implementation.
+Independent full-vocabulary references at temperatures 1.0 and 0.7 had maximum error below 1.91e-6.
+
+| Mode | Prior chat objects, seconds | Numeric arrays, seconds |
+| --- | ---: | ---: |
+| Ordinary TIS | 57.766 | 56.970 |
+| Capture/rescore, SC off | 88.132 | 62.982 |
+| TIS + SC | 88.381 | 62.248 |
+| Probes armed, no observation | 57.683 | 56.993 |
+| Complete probe | 63.356 | 57.706 |
+
+SC cycles were 29.57% shorter, with a descriptive log-time interval of 19.51% to 38.38% shorter. Adoption
+overhead relative to each allocation's ordinary TIS fell from 53.00% to 9.27%; the new paired descriptive
+interval is 7.40% to 11.17%. Two measured cycles and one allocation per arm do not measure population or
+allocation-to-allocation variance. Failed starts and the interrupted East baseline are excluded from these
+[matched results](https://github.com/yonromai/marin/blob/ee2abae52a384675aae56a88d9c916a6286146f0/experiments/post_training/score_centering_integration/evidence/snowball-controlled-cost-matched-rno.json).
+
+The exclusive SC batch-admission wait fell from 71.69 to 45.42 seconds, including generation and rollout
+handoff. The remaining array cycle spent 1.12 seconds assembling the batch, 1.91 preparing old-policy scores,
+7.65 training and 6.13 publishing weights. Concurrent frontend profiles and nested timers overlap and must
+not be added to these walls. Both optimizer batches retain three 256 MiB head matrices; no GPU memory
+reduction is established. CPU flat-logprob lists, array packing, Ray, S3 storage, collation and transfers to
+learner GPUs remain.
+
+The interval-ten controlled probe model is 0.166% overhead, with 570.64 seconds between observations. Its
+paired descriptive interval is wide, -15.84% to 19.23%, and does not establish a sub-1% ceiling. A full probe
+captured 16384 engine tokens and exported 96 valid sampled positions after masks. Defaults remain interval
+ten, K128 and 32 positions per response. Real-reward asynchronous throughput and actual observation spacing
+remain pending. These serialized cycles do not establish learning benefit.
+
+
+Fresh asynchronous arms share the [scalar-grader repair](https://github.com/marin-community/marin/commit/5ef1e703d3bae94d510d8cf3f50d902958e10d20),
+which rejects unsupported nonscalar answers before SymPy finiteness validation. It passes 437 affected grader
+tests and 477 product CPU checks, with three existing dependency skips. A replay of 192 fixed reference-like
+replies preserves every old/new grade, including one existing inequality-format failure. No source row is
+edited or filtered. The repair changes no SC code, package version, other shared package tree or vLLM pin.
+Both fresh arms use the same repaired dependency lock; their timings remain separate from the controls
+above, which used the prior grader revision. The
+[qualification record](https://github.com/yonromai/marin/tree/03d5715226a493859b8995de411f0ef49da25029/experiments/post_training/score_centering_integration)
+retains the parity proof and all incomplete allocation outcomes.
 
 ## Prior Snowball qualification and cost
 
