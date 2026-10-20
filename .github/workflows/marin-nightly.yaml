@@ -71,6 +71,11 @@ jobs:
             bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
             exit
           fi
+          iris_args=()
+          if [[ "${{ matrix.lane }}" == "grug-megatron-h100" ]]; then
+            # Iris excludes tests from workspace bundles unless requested.
+            iris_args+=(--include 'skyrl-train/tests/**/*')
+          fi
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
             --job-name "$JOB_NAME" \
@@ -79,6 +84,7 @@ jobs:
             --no-sync \
             --timeout "${{ matrix.iris_timeout }}" \
             -e GRUG_CUTLASS_WEEKLY "$GRUG_CUTLASS_WEEKLY" \
+            "${iris_args[@]}" \
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
       - name: Cancel any Iris job the run left behind
