@@ -182,6 +182,10 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
+    "marin-shellbox[daytona,shellsim]==0.2.202.dev39324959133",
+    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@6e2fe1839ea067be147f1ce06aced63a96670f7a#subdirectory=lib/taskcompendium",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@6e2fe1839ea067be147f1ce06aced63a96670f7a#subdirectory=lib/rolloutengine",
+    "marin-verifyit @ git+https://github.com/marin-community/marin.git@6e2fe1839ea067be147f1ce06aced63a96670f7a#subdirectory=lib/verifyit",
     "marin-rigging[secrets,prometheus]==0.2.202.dev39324959133",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
