@@ -136,6 +136,45 @@ The measurements use `cloud/iris/configs/snowball_megatron_full.yaml`, which
 overlaps gradient reduction and parameter gathering with compute and reduces
 gradients in bf16. Generation takes about 70% of the step.
 
+## Training communication
+
+Workers with `trainer.algorithm.batch_invariant=true` inherit vLLM's one-channel
+NCCL limit. Megatron policies with TP1 and expert TP1 can set a separate training limit:
+
+```text
+trainer.algorithm.batch_invariant=true
+trainer.policy.megatron_config.tensor_model_parallel_size=1
+trainer.policy.megatron_config.expert_tensor_parallel_size=1
+trainer.policy.megatron_config.nccl_max_channels=8
+```
+
+The limit applies before training process groups are created. Weight transfers
+using `generator.weight_sync_transport=broadcast` keep the serving channel limit
+on both ends. The `expert_block` transport uses separate groups and requires
+`nccl_max_channels=null` or `1`. Leave `NCCL_MAX_CTAS` unset when using this
+option: it can force training back to one channel or override the transfer
+group's limit. The default `nccl_max_channels=null` keeps the existing behavior.
+
+The [Hero 65K channel study](https://marin-us-east-02a.cwobject.com/marin/users/romain/hero-learner-bottlenecks-01a13c0f/reports/HERO65K-LEARNER-BOTTLENECKS.md)
+records the tested layout, precision, memory costs and numerical checks. Its
+full-Hero measurements carry [#1000](https://github.com/marin-community/MarinSkyRL/pull/1000)
+equally in every arm. They measure learner scoring and updates; rollout and
+weight-transfer throughput require separate measurements.
+
+Automatic channel selection ran out of GPU memory on its second update in a
+paired 192-H100 Hero test at 65K. The eight-channel control completed eight
+updates, with warmed medians of 29.29 seconds per update and 11.18 seconds for
+scoring. Eight remains the tested starting point for this workload. See the
+[automatic-selection comparison](https://marin-us-east-02a.cwobject.com/marin/users/romain/hero-nccl-auto-01a13c0f/reports/HERO-NCCL-AUTOMATIC-SELECTION.md)
+for the channel counts, memory measurements and validation.
+
+On full trained Hero, one and eight channels produced identical scores and
+expert choices at each tested batch shape. Both settings changed scores when
+sequences shared a larger forward pass. This option preserves that observed
+baseline behavior; it does not establish exact batch invariance. See the
+[trained-model qualification](https://marin-us-east-02a.cwobject.com/marin/users/romain/hero-nccl-invariance-01a13c0f/reports/HERO-NCCL-BATCH-INVARIANCE.md)
+for the mismatch tails, scope and repair checks.
+
 ## Query bias
 
 Only the frozen query-bias mode is supported. The bias steers expert

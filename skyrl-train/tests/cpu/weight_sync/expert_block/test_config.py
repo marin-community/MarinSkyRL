@@ -49,6 +49,16 @@ def test_validate_cfg_runs_the_transport_check():
         validate_cfg(cfg)
 
 
+def test_training_channels_cannot_change_the_expert_block_broadcast_layout():
+    cfg = expert_block_config()
+    cfg.trainer.policy.megatron_config.nccl_max_channels = 32
+    # Mismatched NCCL channel limits can break a cross-world broadcast.
+    with pytest.raises(ValueError, match="nccl_max_channels"):
+        validate_expert_block_transport(cfg)
+    cfg.generator.weight_sync_transport = "broadcast"
+    validate_expert_block_transport(cfg)
+
+
 def test_the_model_package_imports_before_the_trainer_utilities():
     # The frozen-runtime bootstrap imports the Grug model first. That import reaches
     # skyrl_train.utils and this validator, and must not be circular.
