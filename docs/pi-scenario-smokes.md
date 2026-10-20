@@ -326,7 +326,14 @@ removed 1,891 raw/unchecked artifacts, retaining only eight bounded phase
 journals and four schema-validated, content-free Pi sandbox diagnostics.
 **No complete admitted GRPO batch, nonzero advantage, or optimizer update has
 been demonstrated.** Do not retry this same attempt ID or substitute log
-content for missing in-memory evidence.
+content for missing in-memory evidence. The next Harbor pin
+(`402b19c3677d64e8b9a141a7664b604c6ecc51eb`) logs only four content-free
+shape fields immediately before rejecting an oversized fragment: character
+count, embedded frame-marker count (capped at two), presence of non-base64
+characters, and previously accepted chunk count. It keeps the same
+fail-closed error and never logs stdout, fragment text, or a payload hash.
+This instrumentation applies only to **future** attempts; it cannot diagnose
+the already-failed trial retroactively.
 
 Next smoke gates, in order:
 
