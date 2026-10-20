@@ -2,6 +2,7 @@
 max_verifier_workers: 32 # verifier threads in each rollout worker
 remote_judge: null # Set base_url and api_key_env to grade judge tasks on the rollout host.
 daytona: null # Set api_key_env and ttl_minutes for tasks with the daytona backend.
+token_prefix: null # Set tokenizer_model and immutable tokenizer_revision to match the staged policy tokenizer.
 
 session:
   max_turns: ${generator.max_turns}

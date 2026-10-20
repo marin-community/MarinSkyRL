@@ -16,7 +16,7 @@ from rolloutengine.harness.shell import task_prompt as marin_task_prompt
 from rolloutengine.models import MachineRuntimeSpec, TaskRolloutSpec
 from skyrl_gym.rollout_specs import is_shell_harness, rollout_spec, shell_harness
 from skyrl_gym.source_task import session_parameters, source_task
-from taskcompendium.models import EnvironmentRequirements, NoGrader, Source
+from taskcompendium.models import EnvironmentRequirements, NoGrader, Source, TokenizedInput
 from taskcompendium.runtime.shell import resolve_shell_tool
 from transformers import PreTrainedTokenizerBase
 
@@ -106,6 +106,8 @@ def _restore_task_prompts(batch: dict) -> dict:
 def task_prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
     """Include native task tools in the initial prompt's length budget."""
     lowered = TaskRolloutSpec.model_validate_json(row[TASK_ROLLOUT_COLUMN])
+    if isinstance(lowered.task.context, TokenizedInput):
+        return len(lowered.task.context.token_ids)
     if not is_shell_harness(lowered.harness):
         return _prompt_token_count(tokenizer, row[prompt_key])
     shell_tool = resolve_shell_tool(lowered.task, shell_harness(lowered.harness).shell_tool)

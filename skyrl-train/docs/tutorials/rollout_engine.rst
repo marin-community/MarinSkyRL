@@ -80,6 +80,29 @@ and access to a Docker daemon on the rollout worker host.
 When an executable is unavailable, the worker rejects a batch whose task or verifier machine selects Docker before model requests.
 Machine-free tasks do not require those executables.
 
+Exact token prefixes
+--------------------
+
+Tasks with ``TokenizedInput`` select ``harness="token_prefix"``. Their serialized
+token IDs are authoritative; dataset filtering counts those IDs and retains the
+conversation events for display and grading. The worker serves one raw text
+continuation with ``skip_special_tokens=False``.
+
+Configure the deployed policy tokenizer explicitly:
+
+.. code-block:: yaml
+
+   environment:
+     task_sessions:
+       token_prefix:
+         tokenizer_model: owner/model
+         tokenizer_revision: 0123456789abcdef0123456789abcdef01234567
+
+Use the tokenizer source and immutable revision staged for the policy. Iris may
+replace its filesystem path during staging, so these source pins remain separate.
+A missing configuration or a task with another pin fails before inference.
+This checks deployment configuration; it does not attest the serving tokenizer.
+
 Machines and grading
 --------------------
 

@@ -17,6 +17,11 @@ from skyrl_gym.task_sessions import AnswerTaskSession
 from skyrl_gym.verification import VerificationResult, VerificationStatus
 from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.models import Source
+from taskcompendium.models import AnswerType, PlainText, TextMessage, TokenizedInput
+from taskcompendium.grader import verifyit_package
+from verifyit.closure_scoring import ClosureFormat
+from verifyit.spec import StructureClosureSpec
+from rolloutengine.harness.token_prefix import TokenPrefixHarness
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
@@ -28,6 +33,88 @@ from skyrl_gym.task_records import TaskTransition
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_pin", ["matching", "mismatched", "absent", "changed_prompt", "missing_prompt"])
+async def test_token_prefix_worker_preserves_raw_response_and_enforces_configured_pin(task_inputs, configured_pin):
+    config, request = task_inputs
+    context = TokenizedInput(
+        events=(TextMessage(role="user", content="Complete the supplied structure"),),
+        token_ids=(7, 8, 9),
+        tokenizer_model="fixture/tokenizer",
+        tokenizer_revision="a" * 40,
+    )
+    package = verifyit_package(StructureClosureSpec('{"value":', '{"value":12}', ClosureFormat.JSON, ("<|eot_id|>",)))
+    task = request.rows[0].spec.task.model_copy(
+        update={
+            "context": context,
+            "answer_type": AnswerType.TEXT,
+            "answer_format": PlainText(),
+            "grader": package.grader,
+        }
+    )
+    request = replace(request, rows=(task_input(lowered_task(task, "token_prefix", max_turns=1)),))
+    observed = []
+
+    class Client:
+        async def generate(self, model_request):
+            observed.append(model_request)
+            output = {
+                "responses": ["12}<|eot_id|>"],
+                "assistant_messages": [{"role": "assistant", "content": "Parsed response must be ignored"}],
+                "prompt_ids": [[7, 8, 9]],
+                "response_ids": [[11, 12, 13]],
+                "response_logprobs": [[-0.1, -0.2, -0.3]],
+                "stop_reasons": ["stop"],
+                "token_provenance": TokenProvenance.ENGINE,
+            }
+            if configured_pin == "changed_prompt":
+                output["prompt_ids"] = [[7, 8, 10]]
+            if configured_pin == "missing_prompt":
+                del output["prompt_ids"]
+            return output
+
+    harness = (
+        None
+        if configured_pin == "absent"
+        else TokenPrefixHarness(
+            tokenizer_model="fixture/tokenizer",
+            tokenizer_revision=("b" if configured_pin == "mismatched" else "a") * 40,
+        )
+    )
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(config, Tokenizer()),
+        Client(),
+        {},
+        shutdown_timeout=30,
+        token_prefix_harness=harness,
+    )
+    try:
+        if configured_pin in {"mismatched", "absent"}:
+            with pytest.raises(ValueError, match="tokenizer configuration|tokenizer pin"):
+                await worker.generate(request)
+            assert observed == []
+            return
+        if configured_pin in {"changed_prompt", "missing_prompt"}:
+            with pytest.raises(ExceptionGroup) as error:
+                await worker.generate(request)
+            contract_errors, remaining = error.value.split(RolloutContractError)
+            assert contract_errors is not None and remaining is None
+            assert len(observed) == 1
+            return
+        (result,) = await worker.generate(request)
+    finally:
+        await worker.shutdown()
+    assert observed[0]["prompt_token_ids"] == [[7, 8, 9]]
+    assert observed[0]["sampling_params"]["skip_special_tokens"] is False
+    assert result.grade.reward == 1.0
+    assert result.messages[-1] == {"role": "assistant", "content": "12}<|eot_id|>"}
+    assert result.prompt_token_ids == (7, 8, 9)
+    assert result.response_token_ids == (11, 12, 13)
+    assert result.loss_mask == (1, 1, 1)
+    assert result.logprobs == (-0.1, -0.2, -0.3)
 
 
 @pytest.mark.asyncio
@@ -63,6 +150,7 @@ async def test_protocol_replay_uses_raw_prefix_and_keeps_infrastructure_unscored
                 raise ModelServerError("model_server_error", "replay-request", 503)
             return {
                 "responses": [response],
+                "prompt_ids": [prefix],
                 "response_ids": [[3, 4]],
                 "response_logprobs": [[-0.1, -0.2]],
                 "stop_reasons": ["stop"],
