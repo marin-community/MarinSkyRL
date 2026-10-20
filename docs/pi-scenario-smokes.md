@@ -354,6 +354,23 @@ numeric `diagnostics/frame-shapes.json` receipt. Do not repair a corrupted
 frame from diagnostic logs or claim that these warnings establish why the
 stdout line was changed.
 
+An explicitly opted-in replay on **the same** four-group/two-sample GRPO path
+(`grpo-attempt-32-raw-frame-four-groups`, Iris
+`/zack/pi-beta-verifier-grpo-gb200-20261020-r4`) exposed one rejected line:
+frame index 22/162 was 3,112 characters, with base64 interrupted after 552
+characters by Pi's **own JSON conversation event** (assistant text, tool
+calls, and tool observations), not a second evidence frame. This is evidence
+of stdout-stream interleaving, not a token-budget overrun. The job failed
+without a checkpoint. We removed 1,892 raw/unchecked S3 objects after
+inspection and retained only validated diagnostics and a content-free
+`diagnostics/raw-frame-finding.json` receipt. Because stdout includes agent
+messages, do not enable `dump_oversized_frame` outside a controlled one-off
+trial. Harbor's subsequent producer change (`b8238080`) sends evidence over
+a dedicated inherited FD 3, suppressing Pi's JSON echo into the evidence
+stdout while retaining event validation. A local test covers a concurrent
+large JSON event and evidence frames; **the real Daytona/GPU path has not yet
+validated this change**.
+
 Next smoke gates, in order:
 
 1. The saved step-1 student and step-0 baseline both scored 0/8 under the old
