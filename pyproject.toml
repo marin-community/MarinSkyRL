@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "marin-verifyit[math,schema,reasoning-gym,judge]>=0.2.202.dev39324959133",
+    "marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@6e2fe1839ea067be147f1ce06aced63a96670f7a#subdirectory=lib/verifyit",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -34,7 +34,7 @@ dependencies = [
     "marin-iris>=0.2.202.dev39324959133",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.202.dev39324959133",
-    "marin-rolloutengine>=0.2.202.dev39324959133",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@6e2fe1839ea067be147f1ce06aced63a96670f7a#subdirectory=lib/rolloutengine",
     "marin-shellbox[daytona,shellsim]>=0.2.202.dev39324959133",
     "ninja",
     "nvidia-ml-py",
@@ -52,7 +52,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "marin-taskcompendium>=0.2.202.dev39324959133",
+    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@6e2fe1839ea067be147f1ce06aced63a96670f7a#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
