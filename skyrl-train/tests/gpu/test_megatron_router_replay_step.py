@@ -71,7 +71,9 @@ def _routed_batch(pad_token_id: int, *, routes: str = "random", seed: int = 29) 
             (*shape[:2], NUM_LAYERS - 1, TOPK), NUM_EXPERTS, generator=generator
         )
     elif routes == "wrong_response":
-        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)[:, :-1]
+        # Short local captures are valid; an overlong capture exceeds the global response window.
+        shape = (shape[0], RESPONSE_LENGTH + 1, NUM_LAYERS, TOPK)
+        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
     else:
         raise ValueError(routes)
     batch["rollout_routed_experts"] = rollout_routed_experts.to(torch.int32)
