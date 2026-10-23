@@ -34,6 +34,21 @@ Hero parameter families, packed training, repeated updates, and checkpoint
 continuation; passing it alone does not establish full-Hero capacity or parity
 with Levanter.
 
+With full/uniform recomputation and pipeline parallelism, Grug can store checkpoint
+inputs in pinned CPU memory:
+
+```bash
++trainer.policy.megatron_config.transformer_config_kwargs.grug_checkpoint_cpu_offload=true
+```
+
+This opt-in uses PyTorch's `save_on_cpu` on non-final model stages. It includes
+the embedding stage's saved inputs as well as decoder checkpoints. Backward
+restores each input to its original device before recomputation. Scoring and
+the final pipeline stage keep their normal storage policy. It trades host
+memory and device-to-host/host-to-device copies for GPU headroom; update time
+can increase. It cannot be combined with Megatron's other activation-offload
+modes.
+
 The port lives in two modules:
 
 - `skyrl_train.models.grug_megatron` holds the Megatron-Core modules that a
